@@ -1,0 +1,14 @@
+{
+  "name": "xq-koyeb",
+  "version": "1.0.0",
+  "description": "Chinese Chess on Koyeb/Node.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.16.0",
+    "better-sqlite3": "^11.6.0"
+  }
+}
