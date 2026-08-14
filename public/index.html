@@ -1027,8 +1027,16 @@ else if(document.webkitExitFullscreen)document.webkitExitFullscreen();
 soundEnabled=false;gameOverSoundPlayed=false;
 if(audioCtx){try{audioCtx.close();}catch(e){}audioCtx=null;}
 stopTimer();stopAi();gameStarted=false;selected=null;validMoves=[];capRed=[];capBlk=[];lastMove=null;engine.initBoard();
-if(gm==='online'&&sockOk){try{socket.emit('leave_room');}catch(e){}}
-if(socket){try{socket.disconnect();}catch(e){}socket=null;sockOk=false;}
+// 关键：先保存旧 socket 引用，再发 leave_room，然后立即关闭旧连接
+// 不能等 setTimeout，因为 connectSocket() 会覆盖 socket 变量！
+var oldSocket = socket;
+if(gm==='online'&&sockOk && oldSocket){
+try{oldSocket.emit('leave_room');}catch(e){}
+setTimeout(function(){if(oldSocket){try{oldSocket.disconnect();}catch(e){}}}, 100);
+}else{
+if(oldSocket){try{oldSocket.disconnect();}catch(e){}}
+}
+socket=null; sockOk=false;
 gm='local';myCl=null;myRm=null;boardFlip=false;D('drawBtn').style.display='none';
 D('game').classList.remove('show');D('lobby').classList.remove('hide');
 D('redName').textContent='红方';D('blackName').textContent='黑方';
@@ -1044,8 +1052,14 @@ else if(document.webkitExitFullscreen)document.webkitExitFullscreen();
 soundEnabled=false;gameOverSoundPlayed=false;
 if(audioCtx){try{audioCtx.close();}catch(e){}audioCtx=null;}
 stopTimer();stopAi();gameStarted=false;selected=null;validMoves=[];capRed=[];capBlk=[];lastMove=null;engine.initBoard();
-if(gm==='online'&&sockOk){try{socket.emit('leave_room');}catch(e){}}
-if(socket){try{socket.disconnect();}catch(e){}socket=null;sockOk=false;}
+var oldSocket = socket;
+if(gm==='online'&&sockOk && oldSocket){
+try{oldSocket.emit('leave_room');}catch(e){}
+setTimeout(function(){if(oldSocket){try{oldSocket.disconnect();}catch(e){}}},100);
+}else{
+if(oldSocket){try{oldSocket.disconnect();}catch(e){}}
+}
+socket=null; sockOk=false;
 gm='local';myCl=null;myRm=null;boardFlip=false;D('drawBtn').style.display='none';
 D('game').classList.remove('show');D('lobby').classList.remove('hide');
 D('redName').textContent='红方';D('blackName').textContent='黑方';

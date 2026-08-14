@@ -406,6 +406,20 @@ class ChessRoomManager {
 
       room.players.delete(ws);
       if (room._timer) { clearInterval(room._timer); room._timer = null; }
+
+      // 如果玩家全部离开，立即销毁房间（处理 leave_room + disconnect 的竞态问题）
+      if (room.players.size === 0) {
+        if (room._disconnectTimer) { clearTimeout(room._disconnectTimer); room._disconnectTimer = null; }
+        // 关闭所有旁观者
+        room.spectators.forEach(s => { try { s.close(); } catch (e) {} });
+        room.spectators.clear();
+        deleteRoomState(room.id);
+        this.rooms.delete(room.id);
+        room.disconnected = {};
+        broadcastOnlineCount();
+        return;
+      }
+
       if (!room.disconnected) room.disconnected = {};
       room.disconnected[socketData.color] = Date.now();
       broadcastToOpponent(ws, JSON.stringify({ event: 'player_disconnected', data: { color: socketData.color } }));
