@@ -1,0 +1,21 @@
+name: Deploy to Koyeb
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Deploy to Koyeb
+        uses: koyeb-community/koyeb-actions@v2
+        with:
+          koyeb_token: ${{ secrets.KOYEB_API_KEY }}
+          service_name: xq-koyeb
+          regions: par
+          dockerfile: Dockerfile
+          scale_min: 1
+          scale_max: 1
