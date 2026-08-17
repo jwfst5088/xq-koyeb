@@ -657,6 +657,7 @@ var gameStarted=false,selected=null,validMoves=[],capRed=[],capBlk=[],undoUsed=f
 var timerId=null,secs=0;
 var clickCount=0;
 var socket=null,sockOk=false,gm='local',myCl=null,myRm=null;
+  var pendingMove=null,pendingRetryTimer=null; // 本地已走、待服务端确认的走棋（防"刚走的棋回退"，对齐 xq-cloudflare）
 var aiThinking=false,aiTimeout=null,aiWorker=null;
 var aiCl='black'; // AI执棋颜色：'black'或'red'，与myCl相反
 var checkStreak=0,lastCheckColor=null; // 长将追踪：连续将军次数
@@ -862,7 +863,17 @@ if(rs.captured){sndCapture();if(rs.captured.color==='red')capRed.push(rs.capture
 else{sndMove();}
 selected=null;validMoves=[];lastMove={row:tr,col:tc};render();
 D('turnText').textContent=engine.currentTurn==='red'?'红方走棋':'黑方走棋';
-if(gm==='online'&&sockOk){socket.emit('make_move',{fromRow:fr,fromCol:fc,toRow:tr,toCol:tc,captured:rs.captured,pieceColor:mc,currentTurn:engine.currentTurn,gameOver:engine.gameOver,winner:engine.winner,redLeft:redLeft,blkLeft:blkLeft});saveGameState();}
+if(gm==='online'&&sockOk){
+var pendingData={fromRow:fr,fromCol:fc,toRow:tr,toCol:tc,captured:rs.captured,pieceColor:mc,currentTurn:engine.currentTurn,gameOver:engine.gameOver,winner:engine.winner,redLeft:redLeft,blkLeft:blkLeft};
+pendingMove=pendingData;
+socket.send(JSON.stringify({event:'make_move',payload:pendingData}));
+// 3秒内未收到 move_ack 则自动补发（防消息丢失导致回退），服务端有幂等判断不会重复走棋
+if(pendingRetryTimer)clearTimeout(pendingRetryTimer);
+pendingRetryTimer=setTimeout(function(){
+var pm=pendingMove;
+if(pm&&sockOk&&socket&&socket.readyState===1){socket.send(JSON.stringify({event:'make_move',payload:{fromRow:pm.fromRow,fromCol:pm.fromCol,toRow:pm.toRow,toCol:pm.toCol,captured:pm.captured,pieceColor:pm.pieceColor,currentTurn:pm.currentTurn,gameOver:pm.gameOver,winner:pm.winner,redLeft:pm.redLeft,blkLeft:pm.blkLeft}}));}
+},3000);
+saveGameState();}
 if(gm==='ai'||gm==='cloudai')saveGameState();
 if(engine.gameOver){
 	sndGameOver();stopTimer();
@@ -1136,6 +1147,8 @@ if(socket){try{socket.disconnect();}catch(e){}socket=null;}
 socket=io({transports:['websocket','polling'],reconnection:true,reconnectionAttempts:Infinity,reconnectionDelay:1000,timeout:8000,pingTimeout:8000,pingInterval:4000,randomizationFactor:0});
 socket.on('connect',function(){sockOk=true;D('lobbyStatus').textContent='● 服务器已连接';D('footerText').textContent='人机对弈需联网 | 在线模式两人对战';
 hideReconnecting();
+// 清除 pendingMove（重连时 pendingMove 已无效）
+pendingMove=null;if(pendingRetryTimer){clearTimeout(pendingRetryTimer);pendingRetryTimer=null;}
 var isPageReload=!!window._pendingReconnect;
 if(window._pendingRoomAction&&socket.roomId){var pa=window._pendingRoomAction;window._pendingRoomAction=null;
  if(pa.action==='reconnect'){socket.emit('reconnect_room',{roomId:pa.roomId,color:pa.color});}
@@ -1169,6 +1182,44 @@ updateBoardSize();drawBoardBg();render();
 toast('对手已加入，对局开始!',2000);startTimer();
 sndStart();
 });
+socket.on('move_ack',function(d){
+// 服务端已确认走棋：清除本地 pendingMove，停止补发定时器
+if(pendingMove){
+var acked=false;
+if(d&&d.lastMove){
+acked=(pendingMove.fromRow===d.lastMove.fromRow&&pendingMove.fromCol===d.lastMove.fromCol&&pendingMove.toRow===d.lastMove.toRow&&pendingMove.toCol===d.lastMove.toCol);
+}else{
+acked=true;
+}
+if(acked){
+pendingMove=null;
+if(pendingRetryTimer){clearTimeout(pendingRetryTimer);pendingRetryTimer=null;}
+}
+}
+});
+socket.on('move_rejected',function(d){
+// 服务端拒绝了走棋（如回合不匹配）：回退本地一步并请求全量同步纠正，
+// 避免本地与服务端状态分叉
+if(!pendingMove)return;
+var pm=pendingMove;
+pendingMove=null;
+if(pendingRetryTimer){clearTimeout(pendingRetryTimer);pendingRetryTimer=null;}
+// 本地撤销刚走的一步（与该 pendingMove 匹配时）
+if(engine.moveHistory.length>0){
+var lm=engine.moveHistory[engine.moveHistory.length-1];
+if(lm.fromRow===pm.fromRow&&lm.fromCol===pm.fromCol&&lm.toRow===pm.toRow&&lm.toCol===pm.toCol){
+undoLastMoveHelper();
+selected=null;validMoves=[];
+if(engine.moveHistory.length>0){var lm2=engine.moveHistory[engine.moveHistory.length-1];lastMove={row:lm2.toRow,col:lm2.toCol};}else{lastMove=null;}
+D('turnText').textContent=engine.currentTurn==='red'?'红方走棋':'黑方走棋';
+render();
+}
+}
+// 拉取服务端全量状态，确保两端一致（防分叉）
+if(gm==='online'&&myRm&&sockOk){socket.emit('reconnect_room',{roomId:myRm,color:myCl});}
+toast((d&&d.reason==='not_your_turn')?'状态已同步，请重新走棋':'走棋未生效，已同步状态',1800);
+saveGameState();
+});
 socket.on('opponent_move',function(d){
 if(d.fromRow!==undefined){
 // 去重：检查该走棋是否已在本地历史中（可能已被 room_state 全量同步应用过）
@@ -1197,9 +1248,11 @@ saveGameState();
 }
 });
 socket.on('game_over',function(d){
+pendingMove=null;if(pendingRetryTimer){clearTimeout(pendingRetryTimer);pendingRetryTimer=null;}
 sndGameOver();stopTimer();engine.gameOver=true;engine.winner=d.winner;showGameOver(d.winner==='draw'?'和棋':(d.winner==='red'?'红方':'黑方'));clearGameState();
 });
 socket.on('timeout',function(d){
+pendingMove=null;if(pendingRetryTimer){clearTimeout(pendingRetryTimer);pendingRetryTimer=null;}
 stopTimer();engine.gameOver=true;engine.winner=d.winner;showGameOver(d.winner==='red'?'红方':'黑方');clearGameState();
 });
 socket.on('player_disconnected',function(d){
@@ -1220,13 +1273,22 @@ D('blackName').textContent=myCl==='black'?'你（黑方）':'对手（黑方）'
 D('drawBtn').style.display='inline-flex';
 boardFlip=(myCl==='black');
 var isPageReload=window._isPageReload;window._isPageReload=false;
+// 本地领先保护：本地恰好比服务端多1步且正是 pendingMove（未确认走棋）时，
+// 全量同步不应覆盖本地（防止"刚走的棋回退"），等待 move_ack 或自动补发
+var localPendingAhead=false;
+if(!isPageReload&&pendingMove&&engine.moveHistory.length===d.moveHistory.length+1){
+var _lp=engine.moveHistory[engine.moveHistory.length-1];
+if(_lp&&_lp.fromRow===pendingMove.fromRow&&_lp.fromCol===pendingMove.fromCol&&_lp.toRow===pendingMove.toRow&&_lp.toCol===pendingMove.toCol){localPendingAhead=true;}
+}
 if(engine.gameOver&&!isPageReload){
+if(!localPendingAhead){
 engine.gameOver=d.gameOver;engine.winner=d.winner;
-gameStarted=d.gameStarted;
+if(d.gameStarted!==undefined){gameStarted=d.gameStarted;}else{gameStarted=(d.moveHistory&&d.moveHistory.length>0);}
 D('turnText').textContent=gameStarted?(engine.currentTurn==='red'?'红方走棋':'黑方走棋'):'等待对手加入...';
 if(d.capturedRed)capRed=d.capturedRed;if(d.capturedBlack)capBlk=d.capturedBlack;
 if(d.redTime!=null){redLeft=d.redTime;blkLeft=d.blkTime;}
 updateBoardSize();drawBoardBg();render();
+}
 return;
 }
 // 全量同步：当本地历史与服务器不一致时重新初始化，确保两个终端状态完全一致
@@ -1251,25 +1313,31 @@ engine.currentTurn=d.currentTurn;
 }
 }else{
 // 差异较大或页面重载：全量同步
+// 本地领先保护：若本地恰好多出 pendingMove（未确认走棋），保留本地，等待 ack/补发
+if(!localPendingAhead){
 engine.initBoard();engine.currentTurn='red';engine.gameOver=false;engine.winner=null;engine.moveHistory=[];
 capRed=[];capBlk=[];lastMove=null;
 for(var i=0;i<d.moveHistory.length;i++){var m=d.moveHistory[i];var rs=engine.move(m.fromRow,m.fromCol,m.toRow,m.toCol);if(rs&&rs.captured){if(rs.captured.color==='red')capRed.push(rs.captured);else capBlk.push(rs.captured);}}
 if(d.moveHistory.length>0){var lm=d.moveHistory[d.moveHistory.length-1];lastMove={row:lm.toRow,col:lm.toCol};}
 engine.currentTurn=d.currentTurn;
 }
+}
 }}else{
 // 历史一致时仅更新lastMove
 if(d.moveHistory.length>0){var lm=d.moveHistory[d.moveHistory.length-1];lastMove={row:lm.toRow,col:lm.toCol};}
 }
-engine.gameOver=d.gameOver;engine.winner=d.winner;
+if(!localPendingAhead){engine.gameOver=d.gameOver;engine.winner=d.winner;}
+if(!localPendingAhead){
 if(d.capturedRed)capRed=d.capturedRed;if(d.capturedBlack)capBlk=d.capturedBlack;
-gameStarted=d.gameStarted;selected=null;validMoves=[];
+}
+// 若服务端未提供 gameStarted，根据是否有走棋记录判断（向后兼容旧版服务端）
+if(d.gameStarted!==undefined){gameStarted=d.gameStarted;}else{gameStarted=(d.moveHistory&&d.moveHistory.length>0);}
+selected=null;validMoves=[];
 D('turnText').textContent=gameStarted?(engine.currentTurn==='red'?'红方走棋':'黑方走棋'):'等待对手加入...';
 if(d.redTime!=null){redLeft=d.redTime;blkLeft=d.blkTime;}
 if(gameStarted){stopTimer();if(redLeft<=0||blkLeft<=0){redLeft=900;blkLeft=900;}timerId=setInterval(function(){if(engine.gameOver){stopTimer();return;}if(engine.currentTurn==='red'){redLeft=Math.max(0,redLeft-1);}else{blkLeft=Math.max(0,blkLeft-1);}updateTimers();if(redLeft<=0){stopTimer();engine.gameOver=true;engine.winner='black';sndGameOver();showGameOver('黑方');clearGameState();}else if(blkLeft<=0){stopTimer();engine.gameOver=true;engine.winner='red';sndGameOver();showGameOver('红方');clearGameState();}},1000);updateTimers();}
 requestAnimationFrame(function(){drawBoardBg();render();});
 hideOverlay();hideReconnecting();
-
 saveGameState();
 });
 socket.on('opponent_left',function(){hideReconnecting();toast('棋局已结束',5000);setTimeout(function(){leaveGameSilent();},5000);});
@@ -1277,7 +1345,10 @@ socket.on('room_timeout',function(){hideReconnecting();toast('棋局已结束',5
 socket.on('draw_requested',function(){showOverlay('<h2>🤝 求和请求</h2><p>对手请求和棋</p><div class="btns2"><button class="btn btn-outline" style="width:auto;padding:8px 16px;font-size:13px" onclick="accDraw()">同意</button><button class="btn btn-red" onclick="rejDraw()">拒绝</button></div>');});
 socket.on('draw_rejected',function(){toast('对方拒绝了求和');});
 socket.on('rematch_requested',function(){showOverlay('<h2>对方请求再来一局</h2><p>是否同意重新开始？</p><div class="btns2"><button class="btn btn-green" style="width:auto;padding:10px 20px;font-size:14px" onclick="acceptRematch()">同意</button><button class="btn btn-outline" style="width:auto;padding:10px 20px;font-size:14px" onclick="leaveGame()">拒绝并退出</button></div>');});
-socket.on('rematch_start',function(){hideOverlay();undoUsed=false;engine.initBoard();engine.currentTurn='red';engine.gameOver=false;engine.winner=null;engine.moveHistory=[];capRed=[];capBlk=[];lastMove=null;selected=null;validMoves=[];gameStarted=true;clickCount=0;D('turnText').textContent='红方走棋';updateBoardSize();drawBoardBg();render();startTimer();toast('再来一局!',1500);sndStart();saveGameState();});
+socket.on('rematch_start',function(){
+hideOverlay();undoUsed=false;
+if(gm==='online'&&myRm){socket.emit('reconnect_room',{roomId:myRm,color:myCl});}
+});
 socket.on('error', function(msg){
     if(gm==='online'&&myRm&&(msg==='房间已不存在'||msg==='无法重连'||msg.indexOf('无法重连')===0)){
         // 不自动退出，启动重连重试

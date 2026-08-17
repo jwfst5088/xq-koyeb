@@ -253,9 +253,26 @@ class ChessRoomManager {
           broadcastToPlayers(JSON.stringify({ event: 'game_start', data: { currentTurn: room.currentTurn } }));
           startRoomTimer();
         } else if (eventName === 'make_move') {
-          if (!room || room.gameOver || room.players.size < 2) return;
-          if (!socketData.color) return;
-          if (room.currentTurn !== socketData.color) return;
+          if (!room || room.gameOver || room.players.size < 2) {
+            ws.send(JSON.stringify({ event: 'move_rejected', data: { reason: 'invalid_state' } }));
+            return;
+          }
+          if (!socketData.color) {
+            ws.send(JSON.stringify({ event: 'move_rejected', data: { reason: 'no_color' } }));
+            return;
+          }
+          // 幂等判断：如果该步已在历史末尾，直接回复确认
+          const lastMv = room.moveHistory[room.moveHistory.length - 1];
+          if (lastMv && lastMv.fromRow === payload.fromRow && lastMv.fromCol === payload.fromCol &&
+              lastMv.toRow === payload.toRow && lastMv.toCol === payload.toCol) {
+            ws.send(JSON.stringify({ event: 'move_ack', data: { moveHistoryLen: room.moveHistory.length, lastMove: { fromRow: lastMv.fromRow, fromCol: lastMv.fromCol, toRow: lastMv.toRow, toCol: lastMv.toCol }, currentTurn: room.currentTurn } }));
+            return;
+          }
+          // 回合校验
+          if (room.currentTurn !== socketData.color) {
+            ws.send(JSON.stringify({ event: 'move_rejected', data: { reason: 'not_your_turn' } }));
+            return;
+          }
           const move = { ...payload, timestamp: Date.now() };
           room.moveHistory.push(move);
           if (move.captured) {
@@ -273,6 +290,9 @@ class ChessRoomManager {
             if (room._timer) { clearInterval(room._timer); room._timer = null; }
           }
           const opponentMove = { ...move, redLeft: room.redTime, blkLeft: room.blkTime };
+          // 向走棋方发送确认
+          ws.send(JSON.stringify({ event: 'move_ack', data: { moveHistoryLen: room.moveHistory.length, lastMove: { fromRow: move.fromRow, fromCol: move.fromCol, toRow: move.toRow, toCol: move.toCol }, currentTurn: room.currentTurn } }));
+          // 向对手发送走棋事件
           broadcastToOpponent(ws, JSON.stringify({ event: 'opponent_move', data: opponentMove }));
           broadcastRoomStateToOpponent(ws);
           broadcastToSpectators(JSON.stringify({ event: 'opponent_move', data: opponentMove }));
@@ -320,7 +340,9 @@ class ChessRoomManager {
           const lastMove = room.moveHistory.pop();
           room.gameOver = false;
           room.winner = null;
-          room.currentTurn = lastMove.currentTurn === 'red' ? 'black' : 'red';
+          // 撤销后回退到上一步的走棋方
+          const lastAfterUndo = room.moveHistory[room.moveHistory.length - 1];
+          room.currentTurn = lastAfterUndo ? (lastAfterUndo.pieceColor === 'red' ? 'black' : 'red') : 'red';
           if (lastMove.captured) {
             if (lastMove.captured.color === 'red' && room.capturedRed && room.capturedRed.length > 0) {
               room.capturedRed.pop();
