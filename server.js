@@ -583,7 +583,7 @@ app.get('/favicon.ico',(req,res)=>{
   res.status(204).end();
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 async function startup() {
   db = initDB();
   server.listen(PORT, '0.0.0.0', () => {
