@@ -1432,7 +1432,7 @@ connectSocket();
 
 function enterOnlineGame(rid,cl){
 soundEnabled=true;gameOverSoundPlayed=false;undoUsed=false;
-boardFlip=(cl==='black');D('lobby').classList.add('hide');D('game').classList.add('show');
+myCl=cl;boardFlip=(cl==='black');D('lobby').classList.add('hide');D('game').classList.add('show');
 D('modeBadge').textContent='房间: '+rid;
 engine.initBoard();engine.currentTurn='red';engine.gameOver=false;engine.winner=null;engine.moveHistory=[];
 capRed=[];capBlk=[];lastMove=null;selected=null;validMoves=[];gameStarted=false;clickCount=0;
