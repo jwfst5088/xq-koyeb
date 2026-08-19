@@ -1153,7 +1153,7 @@ socket.on('ping',function(){socket.emit('pong');});
 socket.on('connect_error',function(){sockOk=false;D('lobbyStatus').textContent='○ 连接失败（本地模式可用）';});
 socket.on('online_count',function(count){D('onlineCount').textContent='当前在线: '+count+' 人';});
 socket.on('room_created',function(d){
-myRm=d.roomId;myCl=d.color;gm='online';
+myRm=d.roomId;gm='online';
 D('lobbyStatus').innerHTML='房间号: <strong style="font-size:20px;color:#d4a843;letter-spacing:3px;">'+d.roomId+'</strong>';
 enterOnlineGame(d.roomId,d.color);
 D('turnText').textContent='等待对手加入...';
@@ -1163,7 +1163,7 @@ window._pendingRoomAction=d;
 socket.reconnectToRoom(d.roomId);
 });
 socket.on('room_joined',function(d){
-myRm=d.roomId;myCl=d.color;gm='online';D('lobbyStatus').textContent='';
+myRm=d.roomId;gm='online';D('lobbyStatus').textContent='';
 enterOnlineGame(d.roomId,d.color);
 });
 socket.on('game_start',function(d){
@@ -1255,7 +1255,7 @@ socket.on('player_reconnected',function(d){
 	hideOverlay();hideReconnecting();
 });
 socket.on('room_state',function(d){
-myRm=d.roomId;myCl=d.color;gm='online';
+myRm=d.roomId;gm='online';
 D('lobby').classList.add('hide');D('game').classList.add('show');
 D('modeBadge').textContent='房间: '+d.roomId;
 D('redName').textContent=myCl==='red'?'你（红方）':'对手（红方）';
