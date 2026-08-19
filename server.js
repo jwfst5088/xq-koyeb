@@ -184,6 +184,18 @@ io.on('connection', (socket) => {
     // 重连过渡期：若游戏已开始（有走棋记录），允许 players.size < 2 时继续走棋
     if (room.players.size < 2 && room.moveHistory.length === 0) return;
 
+    // 幂等判断：检查该走棋是否已在历史中（防止重发导致重复走棋）
+    if (room.moveHistory.length > 0) {
+      const last = room.moveHistory[room.moveHistory.length - 1];
+      if (last.fromRow === data.fromRow && last.fromCol === data.fromCol &&
+          last.toRow === data.toRow && last.toCol === data.toCol &&
+          last.pieceColor === data.pieceColor) {
+        // 重复走棋，只发送 ack 确认
+        socket.emit('move_ack', { ok: true });
+        return;
+      }
+    }
+
     const move = {
       ...data,
       playerId: socket.id,
@@ -209,6 +221,9 @@ io.on('connection', (socket) => {
       room._gameEndedAt = Date.now();
       room.winner = data.winner;
     }
+
+    // 发送 move_ack 给走棋方确认
+    socket.emit('move_ack', { ok: true });
 
     const opponentMove = { ...move, redLeft: room.redTime, blkLeft: room.blkTime };
     socket.to(roomId).emit('opponent_move', opponentMove);
