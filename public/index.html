@@ -863,17 +863,7 @@ if(rs.captured){sndCapture();if(rs.captured.color==='red')capRed.push(rs.capture
 else{sndMove();}
 selected=null;validMoves=[];lastMove={row:tr,col:tc};render();
 D('turnText').textContent=engine.currentTurn==='red'?'红方走棋':'黑方走棋';
-if(gm==='online'&&sockOk){
-var pendingData={fromRow:fr,fromCol:fc,toRow:tr,toCol:tc,captured:rs.captured,pieceColor:mc,currentTurn:engine.currentTurn,gameOver:engine.gameOver,winner:engine.winner,redLeft:redLeft,blkLeft:blkLeft};
-pendingMove=pendingData;
-socket.emit('make_move',pendingData);
-// 3秒内未收到 move_ack 则自动补发（防消息丢失导致回退），服务端有幂等判断不会重复走棋
-if(pendingRetryTimer)clearTimeout(pendingRetryTimer);
-pendingRetryTimer=setTimeout(function(){
-var pm=pendingMove;
-if(pm&&sockOk){socket.emit('make_move',{fromRow:pm.fromRow,fromCol:pm.fromCol,toRow:pm.toRow,toCol:pm.toCol,captured:pm.captured,pieceColor:pm.pieceColor,currentTurn:pm.currentTurn,gameOver:pm.gameOver,winner:pm.winner,redLeft:pm.redLeft,blkLeft:pm.blkLeft});}
-},3000);
-saveGameState();}
+if(gm==='online'&&sockOk){socket.emit('make_move',{fromRow:fr,fromCol:fc,toRow:tr,toCol:tc,captured:rs.captured,pieceColor:mc,currentTurn:engine.currentTurn,gameOver:engine.gameOver,winner:engine.winner,redLeft:redLeft,blkLeft:blkLeft});saveGameState();}
 if(gm==='ai'||gm==='cloudai')saveGameState();
 if(engine.gameOver){
 	sndGameOver();stopTimer();
