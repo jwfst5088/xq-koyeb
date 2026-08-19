@@ -253,9 +253,26 @@ class ChessRoomManager {
           broadcastToPlayers(JSON.stringify({ event: 'game_start', data: { currentTurn: room.currentTurn } }));
           startRoomTimer();
         } else if (eventName === 'make_move') {
-          if (!room || room.gameOver || room.players.size < 2) {
+          if (!room || room.gameOver) {
             ws.send(JSON.stringify({ event: 'move_rejected', data: { reason: 'invalid_state' } }));
             return;
+          }
+          // 重连过渡期：若游戏已开始（有走棋记录），允许 players.size < 2 时继续走棋，
+          // 因为对手的 WS 可能暂时在 onclose→reconnect_room 的间隙中。
+          // 若游戏尚未开始（无走棋记录），players.size < 2 说明对手还没加入，拒绝走棋。
+          if (room.players.size < 2 && room.moveHistory.length === 0) {
+            ws.send(JSON.stringify({ event: 'move_rejected', data: { reason: 'invalid_state' } }));
+            return;
+          }
+          // 容错：如果 socketData.color 未设置（例如 WS 刚连接但 reconnect_room 还没处理完），
+          // 从 players 查找该 WS 对应的颜色
+          if (!socketData.color) {
+            for (const [pws, player] of room.players) {
+              if (pws === ws) {
+                socketData.color = player.color;
+                break;
+              }
+            }
           }
           if (!socketData.color) {
             ws.send(JSON.stringify({ event: 'move_rejected', data: { reason: 'no_color' } }));
@@ -319,6 +336,16 @@ class ChessRoomManager {
         } else if (eventName === 'rematch_request') {
           broadcastToOpponent(ws, JSON.stringify({ event: 'rematch_requested', data: {} }));
         } else if (eventName === 'accept_rematch') {
+          if (room.players.size < 2) return;
+          // 换先：交换双方颜色，实现红黑轮换交替（上一盘执红者本盘执黑）
+          const playerEntries = [...room.players.entries()];
+          if (playerEntries.length === 2) {
+            const [wsA, dataA] = playerEntries[0];
+            const [wsB, dataB] = playerEntries[1];
+            const tmpColor = dataA.color;
+            dataA.color = dataB.color;
+            dataB.color = tmpColor;
+          }
           room.gameOver = false;
           room.winner = null;
           room.currentTurn = 'red';
@@ -340,9 +367,8 @@ class ChessRoomManager {
           const lastMove = room.moveHistory.pop();
           room.gameOver = false;
           room.winner = null;
-          // 撤销后回退到上一步的走棋方
-          const lastAfterUndo = room.moveHistory[room.moveHistory.length - 1];
-          room.currentTurn = lastAfterUndo ? (lastAfterUndo.pieceColor === 'red' ? 'black' : 'red') : 'red';
+          // 恢复 currentTurn 为走棋前的颜色
+          room.currentTurn = lastMove.currentTurn === 'red' ? 'black' : 'red';
           if (lastMove.captured) {
             if (lastMove.captured.color === 'red' && room.capturedRed && room.capturedRed.length > 0) {
               room.capturedRed.pop();
@@ -386,9 +412,10 @@ class ChessRoomManager {
               redTime: room.redTime != null ? room.redTime : 900,
               blkTime: room.blkTime != null ? room.blkTime : 900,
               capturedRed: room.capturedRed || [], capturedBlack: room.capturedBlack || [],
-              gameStarted: room.players.size >= 2
+              gameStarted: true
             }
           }));
+          broadcastRoomState();
           if (!room.gameOver && room.players.size >= 2) startRoomTimer();
           broadcastToOpponent(ws, JSON.stringify({ event: 'player_reconnected', data: { color } }));
         } else if (eventName === 'leave_room') {
@@ -396,7 +423,11 @@ class ChessRoomManager {
             room.spectators.delete(ws);
             return;
           }
+          // 先清理定时器和连接，再销毁房间
           if (room._timer) { clearInterval(room._timer); room._timer = null; }
+          if (room._disconnectTimer) { clearTimeout(room._disconnectTimer); room._disconnectTimer = null; }
+          // 标记 replaced 防止 onclose 误触发断线逻辑
+          socketData.replaced = true;
           room.players.delete(ws);
           for (const [pws] of room.players) {
             try { pws.send(JSON.stringify({ event: 'opponent_left', data: {} })); } catch (e) {}
@@ -432,7 +463,6 @@ class ChessRoomManager {
       // 如果玩家全部离开，立即销毁房间（处理 leave_room + disconnect 的竞态问题）
       if (room.players.size === 0) {
         if (room._disconnectTimer) { clearTimeout(room._disconnectTimer); room._disconnectTimer = null; }
-        // 关闭所有旁观者
         room.spectators.forEach(s => { try { s.close(); } catch (e) {} });
         room.spectators.clear();
         deleteRoomState(room.id);

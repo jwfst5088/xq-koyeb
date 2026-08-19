@@ -25,6 +25,7 @@ let selectedPiece = null;
 let validMoves = [];
 let capturedRed = [];
 let capturedBlack = [];
+let pendingMove = null; // 本地领先保护：走棋后等服务端确认，期间允许继续操作
 let timerInterval = null;
 let gameSeconds = 0;
 let boardScale = 1;
@@ -342,6 +343,7 @@ function makeMove(fromRow, fromCol, toRow, toCol) {
   updateTurnIndicator();
 
   if (gameMode === 'online' && socketConnected) {
+    pendingMove = { fromRow, fromCol, toRow, toCol, captured: result.captured, currentTurn: engine.currentTurn, gameOver: engine.gameOver, winner: engine.winner };
     socket.emit('make_move', {
       fromRow, fromCol, toRow, toCol,
       captured: result.captured,
@@ -384,6 +386,8 @@ function onGameEnd(winner) {
     <p>恭喜${winnerText}!</p>
     <div class="overlay-actions">
       <button class="btn btn-primary btn-sm" onclick="startNewGame()">新游戏</button>
+      ${gameMode === 'online' && socketConnected ? '<button class="btn btn-success btn-sm" onclick="requestRematch()">再来一局</button>' : ''}
+      ${gameMode === 'online' && socketConnected ? '<button class="btn btn-secondary btn-sm" onclick="requestUndo()">悔棋</button>' : ''}
       <button class="btn btn-secondary btn-sm" onclick="hideOverlay()">关闭</button>
     </div>
   `);
@@ -515,6 +519,7 @@ function initOnlineGame(color, roomId) {
   gameMode = 'online';
   myColor = color;
   myRoomId = roomId;
+  pendingMove = null;
 
   document.getElementById('mode-badge').textContent = '房间: ' + roomId;
   document.getElementById('btn-draw').style.display = 'inline-flex';
@@ -545,6 +550,7 @@ function leaveGame() {
   gameStarted = false;
   selectedPiece = null;
   validMoves = [];
+  pendingMove = null;
   capturedRed = [];
   capturedBlack = [];
   engine.initBoard();
@@ -584,6 +590,147 @@ function connectSocket() {
     socket.on('connect_error', () => {
       socketConnected = false;
       updateConnStatus('disconnected');
+    });
+
+    socket.on('room_state', (data) => {
+      // 棋盘翻转/状态同步：收到服务端完整房间状态后重建棋盘
+      if (data.color !== undefined && data.color !== null) {
+        myColor = data.color;
+      }
+      // 如果有走棋历史，重建棋盘到正确状态
+      if (data.moveHistory && data.moveHistory.length > 0) {
+        engine.initBoard();
+        engine.currentTurn = 'red';
+        engine.gameOver = false;
+        engine.winner = null;
+        engine.moveHistory = [];
+        capturedRed = [];
+        capturedBlack = [];
+        for (const move of data.moveHistory) {
+          const result = engine.move(move.fromRow, move.fromCol, move.toRow, move.toCol);
+          if (move.captured && result) {
+            if (move.captured.color === 'red') capturedRed.push(move.captured);
+            else capturedBlack.push(move.captured);
+          }
+        }
+        if (data.currentTurn !== undefined) engine.currentTurn = data.currentTurn;
+        if (data.gameOver !== undefined) engine.gameOver = data.gameOver;
+        if (data.winner !== undefined) engine.winner = data.winner;
+        updateCaptured();
+      } else {
+        if (data.currentTurn !== undefined) engine.currentTurn = data.currentTurn;
+        if (data.gameOver !== undefined) engine.gameOver = data.gameOver;
+        if (data.winner !== undefined) engine.winner = data.winner;
+      }
+      // 重连后确认游戏已开始
+      if (data.gameStarted) {
+        gameStarted = true;
+      }
+      // 清除 pendingMove（服务端状态已同步）
+      pendingMove = null;
+      selectedPiece = null;
+      validMoves = [];
+      renderAll();
+      updateTurnIndicator();
+    });
+
+    socket.on('move_ack', (data) => {
+      // 服务端确认走棋成功，清除本地领先保护
+      if (pendingMove) {
+        // 如果服务端确认的步数与本地一致，清除 pendingMove
+        if (data.moveHistoryLen !== undefined && data.moveHistoryLen > 0) {
+          pendingMove = null;
+        }
+      }
+    });
+
+    socket.on('move_rejected', (data) => {
+      // 走棋被拒绝，如果有 pendingMove 则回退
+      if (pendingMove) {
+        // 回退本地棋盘：重新初始化并重放服务端的 moveHistory
+        // 这里简单处理：清空 pendingMove，等待 room_state 同步
+        pendingMove = null;
+      }
+      if (data.reason === 'not_your_turn') {
+        showToast('不是你的回合', 1500);
+      } else if (data.reason === 'no_color') {
+        showToast('连接异常，请重新进入房间', 2000);
+      }
+    });
+
+    socket.on('redirect_room', (data) => {
+      // 大厅重定向到房间
+      if (data.action === 'create' || data.action === 'join') {
+        const roomId = data.roomId;
+        // 重连到房间 WebSocket
+        if (socket.reconnectToRoom) {
+          socket.reconnectToRoom(roomId);
+        }
+      } else if (data.action === 'reconnect') {
+        const roomId = data.roomId;
+        if (socket.reconnectToRoom) {
+          socket.reconnectToRoom(roomId);
+        }
+      }
+    });
+
+    socket.on('rematch_start', (data) => {
+      // 再来一局：重置棋盘（颜色已在 room_state 中更新）
+      engine.initBoard();
+      engine.currentTurn = 'red';
+      engine.gameOver = false;
+      engine.winner = null;
+      engine.moveHistory = [];
+      capturedRed = [];
+      capturedBlack = [];
+      selectedPiece = null;
+      validMoves = [];
+      pendingMove = null;
+      gameStarted = true;
+      updateCaptured();
+      updateTurnIndicator();
+      renderAll();
+      startTimer();
+      showToast('新对局开始!', 2000);
+    });
+
+    socket.on('rematch_requested', (data) => {
+      showOverlay(`
+        <h2>🔄 再来一局</h2>
+        <p>对手请求再来一局</p>
+        <div class="overlay-actions">
+          <button class="btn btn-success btn-sm" onclick="acceptRematch()">同意</button>
+          <button class="btn btn-danger btn-sm" onclick="hideOverlay()">拒绝</button>
+        </div>
+      `);
+    });
+
+    socket.on('player_reconnected', (data) => {
+      showToast('对手已重新连接', 2000);
+    });
+
+    socket.on('opponent_left', (data) => {
+      showToast('对手已离开房间', 3000);
+      stopTimer();
+    });
+
+    socket.on('undo_requested', (data) => {
+      showOverlay(`
+        <h2>↩️ 悔棋请求</h2>
+        <p>对手请求悔棋</p>
+        <div class="overlay-actions">
+          <button class="btn btn-success btn-sm" onclick="acceptUndo()">同意</button>
+          <button class="btn btn-danger btn-sm" onclick="rejectUndo()">拒绝</button>
+        </div>
+      `);
+    });
+
+    socket.on('undo_accepted', (data) => {
+      showToast('对手同意悔棋', 2000);
+    });
+
+    socket.on('undo_rejected', (data) => {
+      showToast('对手拒绝悔棋', 2000);
     });
 
     socket.on('room_created', (data) => {
@@ -708,6 +855,37 @@ function acceptDraw() {
 function rejectDraw() {
   hideOverlay();
   if (socketConnected) socket.emit('reject_draw');
+}
+
+function acceptRematch() {
+  hideOverlay();
+  if (socketConnected) socket.emit('accept_rematch');
+}
+
+function requestRematch() {
+  hideOverlay();
+  if (socketConnected) {
+    socket.emit('rematch_request');
+    showToast('已发送再来一局请求');
+  }
+}
+
+function acceptUndo() {
+  hideOverlay();
+  if (socketConnected) socket.emit('accept_undo');
+}
+
+function rejectUndo() {
+  hideOverlay();
+  if (socketConnected) socket.emit('reject_undo');
+}
+
+function requestUndo() {
+  hideOverlay();
+  if (socketConnected) {
+    socket.emit('request_undo');
+    showToast('已发送悔棋请求');
+  }
 }
 
 document.getElementById('btn-local').addEventListener('click', () => {
