@@ -40,10 +40,10 @@ function closeDB(database) {
 }
 
 // 房间状态
-function saveRoomState(roomId, state) {
-  if (!db) return false;
+function saveRoomState(database, roomId, state) {
+  if (!database) return false;
   try {
-    db.prepare(
+    database.prepare(
       'INSERT OR REPLACE INTO room_state (room_id, state, updated_at) VALUES (?, ?, ?)'
     ).run(roomId, JSON.stringify(state), Date.now());
     return true;
@@ -53,10 +53,10 @@ function saveRoomState(roomId, state) {
   }
 }
 
-function loadRoomState(roomId) {
-  if (!db) return null;
+function loadRoomState(database, roomId) {
+  if (!database) return null;
   try {
-    const row = db.prepare('SELECT state FROM room_state WHERE room_id = ?').get(roomId);
+    const row = database.prepare('SELECT state FROM room_state WHERE room_id = ?').get(roomId);
     if (row && row.state) return JSON.parse(row.state);
   } catch (e) {
     console.error('loadRoomState error:', e);
@@ -64,10 +64,10 @@ function loadRoomState(roomId) {
   return null;
 }
 
-function deleteRoomState(roomId) {
-  if (!db) return;
+function deleteRoomState(database, roomId) {
+  if (!database) return;
   try {
-    db.prepare('DELETE FROM room_state WHERE room_id = ?').run(roomId);
+    database.prepare('DELETE FROM room_state WHERE room_id = ?').run(roomId);
   } catch (e) {}
 }
 
