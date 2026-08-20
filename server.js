@@ -41,6 +41,7 @@ function createRoom() {
     moveHistory: [],
     capturedRed: [],
     capturedBlack: [],
+    gameStarted: false,
     createdAt: Date.now(),
   });
   return roomId;
@@ -58,12 +59,17 @@ function generateRoomId() {
 
 function getRoomState(room) {
   return {
-    id: room.id,
+    roomId: room.id,
     playerCount: room.players.size,
     currentTurn: room.currentTurn,
     gameOver: room.gameOver,
     winner: room.winner,
     moveHistory: room.moveHistory,
+    gameStarted: room.gameStarted || false,
+    capturedRed: room.capturedRed || [],
+    capturedBlack: room.capturedBlack || [],
+    redTime: room.redTime != null ? room.redTime : 900,
+    blkTime: room.blkTime != null ? room.blkTime : 900,
   };
 }
 
@@ -123,6 +129,7 @@ io.on('connection', (socket) => {
         moveHistory: [],
         capturedRed: [],
         capturedBlack: [],
+        gameStarted: false,
         createdAt: Date.now()
       });
     } else {
@@ -171,6 +178,7 @@ io.on('connection', (socket) => {
     socket.emit('room_joined', { roomId, color });
     io.to(roomId).emit('room_state', getRoomState(room));
     io.to(roomId).emit('game_start', { currentTurn: room.currentTurn });
+    room.gameStarted = true;
     startRoomTimer(room);
     console.log(`[房间] ${roomId} 加入, ${color}方: ${socket.id}`);
   });
@@ -295,6 +303,7 @@ io.on('connection', (socket) => {
     room._gameEndedAt = null;
     room.winner = null;
     room.currentTurn = 'red';
+    room.gameStarted = true;
     room.redTime = 900;
     room.blkTime = 900;
     room.moveHistory = [];
