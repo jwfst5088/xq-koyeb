@@ -1253,6 +1253,32 @@ socket.on('player_reconnected',function(d){
 	if(window._dcTimer){clearInterval(window._dcTimer);window._dcTimer=null;}
 	hideOverlay();hideReconnecting();
 });
+socket.on('game_state',function(d){
+if(!d||!d.roomId||!d.color)return;
+// 收到 game_state 表示重连成功，恢复棋盘
+myRm=d.roomId;gm='online';myCl=d.color;
+boardFlip=(myCl==='black');
+D('drawBtn').style.display='inline-flex';
+D('redName').textContent=myCl==='red'?'你（红方）':'对手（红方）';
+D('blackName').textContent=myCl==='black'?'你（黑方）':'对手（黑方）';
+D('modeBadge').textContent='房间: '+d.roomId;
+engine.initBoard();engine.currentTurn='red';engine.gameOver=false;engine.winner=null;engine.moveHistory=[];
+capRed=[];capBlk=[];lastMove=null;
+if(d.moveHistory&&d.moveHistory.length>0){
+for(var i=0;i<d.moveHistory.length;i++){var m=d.moveHistory[i];var rs=engine.move(m.fromRow,m.fromCol,m.toRow,m.toCol);if(rs&&rs.captured){if(rs.captured.color==='red')capRed.push(rs.captured);else capBlk.push(rs.captured);}}
+if(d.moveHistory.length>0){var lm=d.moveHistory[d.moveHistory.length-1];lastMove={row:lm.toRow,col:lm.toCol};}
+}
+engine.currentTurn=d.currentTurn||'red';engine.gameOver=d.gameOver||false;engine.winner=d.winner||null;
+if(d.gameStarted!==undefined)gameStarted=d.gameStarted;else gameStarted=(d.moveHistory&&d.moveHistory.length>0);
+if(d.capturedRed)capRed=d.capturedRed;if(d.capturedBlack)capBlk=d.capturedBlack;
+if(d.redTime!=null){redLeft=d.redTime;blkLeft=d.blkTime;}
+selected=null;validMoves=[];
+D('turnText').textContent=gameStarted?(engine.currentTurn==='red'?'红方走棋':'黑方走棋'):'等待对手加入...';
+if(gameStarted){stopTimer();if(redLeft<=0||blkLeft<=0){redLeft=900;blkLeft=900;}timerId=setInterval(function(){if(engine.gameOver){stopTimer();return;}if(engine.currentTurn==='red'){redLeft=Math.max(0,redLeft-1);}else{blkLeft=Math.max(0,blkLeft-1);}updateTimers();if(redLeft<=0){stopTimer();engine.gameOver=true;engine.winner='black';sndGameOver();showGameOver('黑方');clearGameState();}else if(blkLeft<=0){stopTimer();engine.gameOver=true;engine.winner='red';sndGameOver();showGameOver('红方');clearGameState();}},1000);updateTimers();}
+requestAnimationFrame(function(){drawBoardBg();render();});
+hideOverlay();hideReconnecting();
+saveGameState();
+});
 socket.on('room_state',function(d){
 myRm=d.roomId;gm='online';
 D('lobby').classList.add('hide');D('game').classList.add('show');
@@ -1269,7 +1295,9 @@ if(!isPageReload&&pendingMove&&engine.moveHistory.length===d.moveHistory.length+
 var _lp=engine.moveHistory[engine.moveHistory.length-1];
 if(_lp&&_lp.fromRow===pendingMove.fromRow&&_lp.fromCol===pendingMove.fromCol&&_lp.toRow===pendingMove.toRow&&_lp.toCol===pendingMove.toCol){localPendingAhead=true;}
 }
-if(engine.gameOver&&!isPageReload){
+// 修复Bug2：游戏已结束（认输/求和/将死）后收到room_state，视为rematch/新局，强制执行重置
+var isRematchReset=(engine.gameOver&&d.moveHistory&&d.moveHistory.length===0);
+if(engine.gameOver&&!isPageReload&&!isRematchReset){
 if(!localPendingAhead){
 engine.gameOver=d.gameOver;engine.winner=d.winner;
 if(d.gameStarted!==undefined){gameStarted=d.gameStarted;}else{gameStarted=(d.moveHistory&&d.moveHistory.length>0);}
@@ -1282,8 +1310,9 @@ return;
 }
 // 全量同步：当本地历史与服务器不一致时重新初始化，确保两个终端状态完全一致
 // 防御性检查：如果服务器历史为空但本地有历史，不重置（防止DO冷启动后状态丢失）
-if(engine.moveHistory.length!==d.moveHistory.length||isPageReload){
-if(!(d.moveHistory.length===0&&engine.moveHistory.length>0&&!isPageReload)){
+// 修复Bug2：但在rematch场景（isRematchReset=true）时强制重置
+if(engine.moveHistory.length!==d.moveHistory.length||isPageReload||isRematchReset){
+if(!(d.moveHistory.length===0&&engine.moveHistory.length>0&&!isPageReload&&!isRematchReset)){
 // 如果仅差1步且非页面重载，增量应用缺失的走棋（避免全量同步导致的视觉闪烁）
 if(d.moveHistory.length===engine.moveHistory.length+1&&!isPageReload){
 var newMove=d.moveHistory[d.moveHistory.length-1];
