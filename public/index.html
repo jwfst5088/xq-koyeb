@@ -956,7 +956,6 @@ if(gm==='online'&&sockOk)socket.emit('resign');}
 function doDrawReq(){if(!gameStarted||engine.gameOver)return;if(gm==='online'&&sockOk)socket.emit('request_draw');toast('已发送求和请求');}
 function accDraw(){hideOverlay();engine.gameOver=true;engine.winner='draw';stopTimer();showGameOver('和棋');if(sockOk)socket.emit('accept_draw');}
 function rejDraw(){hideOverlay();if(sockOk)socket.emit('reject_draw');}
-function acceptRematch(){socket.emit('accept_rematch');}
 
 function doUndo(){
 if(!gameStarted||engine.gameOver)return;
@@ -1099,8 +1098,8 @@ if(r>=0&&r<=9&&c>=0&&c<=8)cellClick(r,c);
 
 function newGame(){
 if(gm==='online'&&sockOk){
-socket.emit('rematch_request');
-showOverlay('<h2>等待对方确认...</h2><p>对方是否同意再来一局</p><div class="btns2"><button class="btn btn-outline" style="width:auto;padding:10px 20px;font-size:14px" onclick="leaveGame()">退出</button></div>');
+socket.emit('rematch');
+showToast('正在请求重新对局...');
 return;
 }
 soundEnabled=true;gameOverSoundPlayed=false;undoUsed=false;

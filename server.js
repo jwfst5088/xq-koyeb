@@ -398,12 +398,41 @@ io.on('connection', (socket) => {
     }
 
     const color = socket.data.color;
-    // 房间仅1个玩家（游戏未开始），直接删除房间，避免房间号被永久占用
+    // 房间仅1个玩家
     if (room.players.size < 2) {
-      rooms.delete(roomId);
-      disconnectedPlayers.delete(roomId);
-      if (room._timer) { clearInterval(room._timer); room._timer = null; }
-      console.log(`[清理] 房间 ${roomId} 仅1人断线已解散`);
+      if (room.moveHistory.length > 0) {
+        // 游戏已开始（有走棋记录），保留房间等待重连（参考 xq-vps）
+        if (!disconnectedPlayers.has(roomId)) {
+          disconnectedPlayers.set(roomId, {});
+        }
+        disconnectedPlayers.get(roomId)[color] = Date.now();
+        // 保存房间状态到数据库，防止容器重启后丢失
+        if (db) {
+          try {
+            saveRoomState(db, roomId, {
+              currentTurn: room.currentTurn,
+              gameOver: room.gameOver,
+              winner: room.winner,
+              redTime: room.redTime,
+              blkTime: room.blkTime,
+              moveHistory: room.moveHistory,
+              capturedRed: room.capturedRed,
+              capturedBlack: room.capturedBlack,
+              createdAt: room.createdAt,
+            });
+          } catch (e) {
+            console.error('断线保存房间状态失败:', e);
+          }
+        }
+        socket.to(roomId).emit('player_disconnected', { color });
+        console.log(`[断开] ${socket.id} (${roomId}, ${color}方, 游戏已开始, 等待重连...)`);
+      } else {
+        // 游戏未开始，直接删除房间
+        rooms.delete(roomId);
+        disconnectedPlayers.delete(roomId);
+        if (room._timer) { clearInterval(room._timer); room._timer = null; }
+        console.log(`[清理] 房间 ${roomId} 仅1人断线已解散`);
+      }
       socket.data.roomId = null;
       socket.data.color = null;
       return;
@@ -449,7 +478,7 @@ io.on('connection', (socket) => {
             socket.data.color = color;
             
             const gameInProgress = restoredRoom.moveHistory.length > 0;
-            socket.emit('room_state', {
+            socket.emit('game_state', {
               roomId, color,
               moveHistory: restoredRoom.moveHistory,
               currentTurn: restoredRoom.currentTurn,
@@ -522,7 +551,7 @@ io.on('connection', (socket) => {
 
     // 发送完整游戏状态，包含 gameStarted: true（游戏已开始且有走棋记录时）
     const gameInProgress = room.moveHistory.length > 0;
-    socket.emit('room_state', {
+    socket.emit('game_state', {
       roomId, color,
       moveHistory: room.moveHistory,
       currentTurn: room.currentTurn,

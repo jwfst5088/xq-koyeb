@@ -565,14 +565,20 @@ function leaveGame() {
 
 // 应用游戏状态（用于重连后恢复）
 function applyGameState(data) {
+  gameMode = 'online';
   myColor = data.color;
   myRoomId = data.roomId;
+  pendingMove = null;
   sessionStorage.setItem('xq_roomId', data.roomId);
   sessionStorage.setItem('xq_color', data.color);
   engine.initBoard();
   engine.moveHistory = [];
   capturedRed = [];
   capturedBlack = [];
+
+  // 更新UI
+  document.getElementById('mode-badge').textContent = '房间: ' + data.roomId;
+  document.getElementById('btn-draw').style.display = 'inline-flex';
 
   // 重放所有走棋记录
   if (data.moveHistory && data.moveHistory.length > 0) {
@@ -600,6 +606,7 @@ function applyGameState(data) {
 
   updateCaptured();
   updateTurnIndicator();
+  switchScreen('game');
   drawBoard();
   renderAll();
 
@@ -760,17 +767,6 @@ function connectSocket() {
       showToast('新对局开始!', 2000);
     });
 
-    socket.on('rematch_requested', (data) => {
-      showOverlay(`
-        <h2>🔄 再来一局</h2>
-        <p>对手请求再来一局</p>
-        <div class="overlay-actions">
-          <button class="btn btn-success btn-sm" onclick="acceptRematch()">同意</button>
-          <button class="btn btn-danger btn-sm" onclick="hideOverlay()">拒绝</button>
-        </div>
-      `);
-    });
-
     socket.on('player_reconnected', (data) => {
       showToast('对手已重新连接', 2000);
     });
@@ -844,11 +840,13 @@ function connectSocket() {
     socket.on('game_over', (data) => {
       stopTimer();
       if (data.reason === 'resign') {
+        const isWin = engine.winner === myColor;
         showOverlay(`
-          <h2>${engine.winner === myColor ? '🎉 胜利' : '😔 失败'}</h2>
+          <h2>${isWin ? '🎉 胜利' : '😔 失败'}</h2>
           <p>对方认输, ${engine.winner === 'red' ? '红方' : '黑方'}获胜!</p>
           <div class="overlay-actions">
             <button class="btn btn-primary btn-sm" onclick="startNewGame()">新游戏</button>
+            <button class="btn btn-success btn-sm" onclick="requestRematch()">再来一局</button>
             <button class="btn btn-secondary btn-sm" onclick="hideOverlay()">关闭</button>
           </div>
         `);
@@ -923,16 +921,11 @@ function rejectDraw() {
   if (socketConnected) socket.emit('reject_draw');
 }
 
-function acceptRematch() {
-  hideOverlay();
-  if (socketConnected) socket.emit('accept_rematch');
-}
-
 function requestRematch() {
   hideOverlay();
   if (socketConnected) {
-    socket.emit('rematch_request');
-    showToast('已发送再来一局请求');
+    socket.emit('rematch');
+    showToast('正在请求重新对局...');
   }
 }
 
@@ -1026,16 +1019,24 @@ window.addEventListener('orientationchange', () => {
 });
 
 document.addEventListener('DOMContentLoaded', () => {
-  switchScreen('lobby');
-  connectSocket();
-  drawBoard();
-
   // 检查是否有未完成的房间会话（页面刷新后恢复）
   const savedRoomId = sessionStorage.getItem('xq_roomId');
   const savedColor = sessionStorage.getItem('xq_color');
   if (savedRoomId && savedColor) {
     myRoomId = savedRoomId;
     myColor = savedColor;
-    // 连接到服务器后，connect 事件会自动发送 reconnect_room
+    // 不显示大厅，显示重连中状态，防止闪烁初始棋盘
+    document.getElementById('lobby').style.display = 'none';
+    document.getElementById('game').style.display = 'flex';
+    document.getElementById('turn-text').textContent = '正在重连...';
+    document.getElementById('turn-text').style.color = '#888';
+    document.getElementById('red-status').textContent = '';
+    document.getElementById('black-status').textContent = '';
+    document.getElementById('timer').textContent = '--:--';
+    document.getElementById('mode-badge').textContent = '房间: ' + savedRoomId;
+  } else {
+    switchScreen('lobby');
   }
+  connectSocket();
+  drawBoard();
 });
