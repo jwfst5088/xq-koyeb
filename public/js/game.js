@@ -775,10 +775,6 @@ function connectSocket() {
       showToast('对手已重新连接', 2000);
     });
 
-    socket.on('player_disconnected', () => {
-      showToast('对手已断开连接', 3000);
-    });
-
     socket.on('opponent_left', (data) => {
       showToast('对手已离开房间', 3000);
       stopTimer();

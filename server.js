@@ -449,7 +449,7 @@ io.on('connection', (socket) => {
             socket.data.color = color;
             
             const gameInProgress = restoredRoom.moveHistory.length > 0;
-            socket.emit('game_state', {
+            socket.emit('room_state', {
               roomId, color,
               moveHistory: restoredRoom.moveHistory,
               currentTurn: restoredRoom.currentTurn,
@@ -522,7 +522,7 @@ io.on('connection', (socket) => {
 
     // 发送完整游戏状态，包含 gameStarted: true（游戏已开始且有走棋记录时）
     const gameInProgress = room.moveHistory.length > 0;
-    socket.emit('game_state', {
+    socket.emit('room_state', {
       roomId, color,
       moveHistory: room.moveHistory,
       currentTurn: room.currentTurn,
