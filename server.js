@@ -317,7 +317,11 @@ io.on('connection', (socket) => {
     }
 
     startRoomTimer(room);
-    io.to(roomId).emit('rematch_start');
+    // 红黑交替轮换：单独通知每个玩家自己的新颜色（客户端据此更新 myCl/boardFlip）
+    for (const [sid, player] of room.players) {
+      const s = io.sockets.sockets.get(sid);
+      if (s) s.emit('rematch_start', { color: player.color });
+    }
     io.to(roomId).emit('room_state', getRoomState(room));
   });
 

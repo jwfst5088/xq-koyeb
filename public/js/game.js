@@ -519,6 +519,9 @@ function initOnlineGame(color, roomId) {
   gameMode = 'online';
   myColor = color;
   myRoomId = roomId;
+  // 保存到 sessionStorage，以便页面刷新后重连
+  if (roomId) sessionStorage.setItem('xq_roomId', roomId);
+  if (color) sessionStorage.setItem('xq_color', color);
   pendingMove = null;
 
   document.getElementById('mode-badge').textContent = '房间: ' + roomId;
@@ -546,6 +549,8 @@ function leaveGame() {
   stopTimer();
   myColor = null;
   myRoomId = null;
+  sessionStorage.removeItem('xq_roomId');
+  sessionStorage.removeItem('xq_color');
   gameMode = 'local';
   gameStarted = false;
   selectedPiece = null;
@@ -556,6 +561,51 @@ function leaveGame() {
   engine.initBoard();
   switchScreen('lobby');
   hideOverlay();
+}
+
+// 应用游戏状态（用于重连后恢复）
+function applyGameState(data) {
+  myColor = data.color;
+  myRoomId = data.roomId;
+  sessionStorage.setItem('xq_roomId', data.roomId);
+  sessionStorage.setItem('xq_color', data.color);
+  engine.initBoard();
+  engine.moveHistory = [];
+  capturedRed = [];
+  capturedBlack = [];
+
+  // 重放所有走棋记录
+  if (data.moveHistory && data.moveHistory.length > 0) {
+    for (const m of data.moveHistory) {
+      const result = engine.move(m.fromRow, m.fromCol, m.toRow, m.toCol);
+      if (result) {
+        if (result.captured) {
+          if (result.captured.color === 'red') capturedRed.push(result.captured);
+          else capturedBlack.push(result.captured);
+        }
+      }
+    }
+    engine.currentTurn = data.currentTurn || 'red';
+  }
+
+  engine.gameOver = data.gameOver || false;
+  engine.winner = data.winner || null;
+
+  // gameStarted 由服务端提供，若无则根据走棋记录判断
+  if (data.gameStarted !== undefined) {
+    gameStarted = data.gameStarted;
+  } else {
+    gameStarted = data.moveHistory && data.moveHistory.length > 0;
+  }
+
+  updateCaptured();
+  updateTurnIndicator();
+  drawBoard();
+  renderAll();
+
+  if (gameStarted && !engine.gameOver) {
+    startTimer();
+  }
 }
 
 function connectSocket() {
@@ -580,6 +630,10 @@ function connectSocket() {
     socket.on('connect', () => {
       socketConnected = true;
       updateConnStatus('connected');
+      // 重连后，若玩家在房间中，发送 reconnect_room 恢复状态
+      if (myRoomId && myColor) {
+        socket.emit('reconnect_room', { roomId: myRoomId, color: myColor });
+      }
     });
 
     socket.on('disconnect', () => {
@@ -590,6 +644,13 @@ function connectSocket() {
     socket.on('connect_error', () => {
       socketConnected = false;
       updateConnStatus('disconnected');
+    });
+
+    // 处理重连后的游戏状态恢复
+    socket.on('game_state', (data) => {
+      if (data.roomId && data.color) {
+        applyGameState(data);
+      }
     });
 
     socket.on('room_state', (data) => {
@@ -675,7 +736,12 @@ function connectSocket() {
     });
 
     socket.on('rematch_start', (data) => {
-      // 再来一局：重置棋盘（颜色已在 room_state 中更新）
+      // 红黑交替轮换：更新自己的颜色（服务端单独发送 color 给每个玩家）
+      if (data && data.color) {
+        myColor = data.color;
+        sessionStorage.setItem('xq_color', data.color);
+      }
+      // 再来一局：重置棋盘
       engine.initBoard();
       engine.currentTurn = 'red';
       engine.gameOver = false;
@@ -707,6 +773,10 @@ function connectSocket() {
 
     socket.on('player_reconnected', (data) => {
       showToast('对手已重新连接', 2000);
+    });
+
+    socket.on('player_disconnected', () => {
+      showToast('对手已断开连接', 3000);
     });
 
     socket.on('opponent_left', (data) => {
@@ -963,4 +1033,13 @@ document.addEventListener('DOMContentLoaded', () => {
   switchScreen('lobby');
   connectSocket();
   drawBoard();
+
+  // 检查是否有未完成的房间会话（页面刷新后恢复）
+  const savedRoomId = sessionStorage.getItem('xq_roomId');
+  const savedColor = sessionStorage.getItem('xq_color');
+  if (savedRoomId && savedColor) {
+    myRoomId = savedRoomId;
+    myColor = savedColor;
+    // 连接到服务器后，connect 事件会自动发送 reconnect_room
+  }
 });
