@@ -56,9 +56,11 @@ html,body{height:100%;overflow:hidden;font-family:'PingFang SC','Microsoft YaHei
 
 .bg-canvas{position:absolute;inset:0;width:100%;height:100%;z-index:1;pointer-events:none}
 .dot-cv{position:absolute;inset:0;width:100%;height:100%;z-index:2;pointer-events:none}
-.piece{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);border-radius:50%;font-weight:900;cursor:pointer;z-index:3;display:flex;align-items:center;justify-content:center;text-shadow:0 1px 2px rgba(0,0,0,.3);box-shadow:0 2px 6px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.1);pointer-events:none}
-.piece.red-p{background:radial-gradient(circle at 35% 35%,#f5e6c8,#d4a843);color:#8b0000;border:2px solid #8b4513}
-.piece.blk-p{background:radial-gradient(circle at 35% 35%,#f5e6c8,#d4a843);color:#1a1a2e;border:2px solid #3a3a4a}
+.piece{position:absolute;top:50%;left:50%;transform:translate(-50%,-55%);border-radius:50%;font-weight:900;cursor:pointer;z-index:3;display:flex;align-items:center;justify-content:center;pointer-events:none;box-shadow:0 -2px 3px rgba(255,255,255,.42),0 5px 8px rgba(55,30,10,.42);background:radial-gradient(circle at 35% 25%,#f5e4c0 0%,#d4a860 45%,#906030 100%);color:#8b0000;border:2px solid #8b4513}
+.piece::after{content:'';position:absolute;width:86%;height:86%;top:5.5%;left:50%;transform:translateX(-50%);border-radius:50%;background:#c39a5d;box-shadow:none;z-index:-1}
+.piece.blk-p{color:#1a1a2e;border-color:#4a4a4a;background:radial-gradient(circle at 35% 25%,#f5e4c0 0%,#d4a860 45%,#906030 100%)}
+.piece.blk-p::before{content:none}
+.piece.blk-p::after{background:#c39a5d;box-shadow:none;z-index:-1}
 .piece.selected{box-shadow:0 0 0 3px #f1c40f,0 4px 12px rgba(241,196,15,.5),inset 0 1px 0 rgba(255,255,255,.1);filter:brightness(1.1)}
 .piece.last-move{box-shadow:0 0 0 3px rgba(46,204,113,.7),0 0 12px rgba(46,204,113,.35);filter:brightness(1.08)}
 
@@ -131,7 +133,7 @@ html,body{height:100%;overflow:hidden;font-family:'PingFang SC','Microsoft YaHei
 <div class="sub">在线对弈平台</div>
 <div class="btns">
 <button class="btn btn-green" onclick="startAiGame()">  人机对弈</button>
-<button class="btn btn-blue" onclick="startCloudAiGame()">🤖 高级AI人机对弈</button>
+<button class="btn btn-blue" onclick="startPikafishGame()">🤖 Pikafish深度AI</button>
 
 		<div id="trainPanel" style="background:#1a0f0a;border-radius:8px;padding:10px 14px;margin:0 0 8px 0;border:1px solid #3d2117;text-align:left">
 		<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
@@ -197,8 +199,257 @@ html,body{height:100%;overflow:hidden;font-family:'PingFang SC','Microsoft YaHei
 </div>
 <div class="overlay" id="overlay" style="display:none"><div class="box" id="overlayBox"></div></div>
 	
-	<script src="/socket.io/socket.io.js"></script>
+	<script src="/js/pikafish-engine.js?v=1787540000002"></script>
+<script src="/js/socket-client.js"></script>
 <script>
+// ========== Pikafish WASM 加载 (IndexedDB 缓存 + 分片顺序加载) ==========
+var WASM_DB = 'pikafish_wasm_cache';
+var WASM_KEY = 'pikafish_wasm_v2';
+var WASM_SHARD_TIMEOUT = 180000;
+var WASM_TOTAL_TIMEOUT = 540000;
+window._pikaWasmBinary = null;
+window._pikaNnueBinary = null;
+window._pikafishScriptsReady = false;
+window._pikafishScriptsResolve = null;
+window._pikafishScriptsPromise = new Promise(function(resolve) {
+  window._pikafishScriptsResolve = resolve;
+});
+
+function getCachedWasm() {
+  return new Promise(function(resolve) {
+    try {
+      var req = indexedDB.open(WASM_DB, 1);
+      req.onupgradeneeded = function(e) { e.target.result.createObjectStore('wasm'); };
+      req.onsuccess = function(e) {
+        var db = e.target.result;
+        try {
+          var tx = db.transaction('wasm', 'readonly');
+          var store = tx.objectStore('wasm');
+          var getReq = store.get(WASM_KEY);
+          getReq.onsuccess = function() { resolve(getReq.result || null); };
+          getReq.onerror = function() { resolve(null); };
+        } catch (e2) { resolve(null); }
+      };
+      req.onerror = function() { resolve(null); };
+    } catch (e) { resolve(null); }
+  });
+}
+
+function saveCachedWasm(buffer) {
+  try {
+    var req = indexedDB.open(WASM_DB, 1);
+    req.onupgradeneeded = function(e) { e.target.result.createObjectStore('wasm'); };
+    req.onsuccess = function(e) {
+      try {
+        var tx = e.target.result.transaction('wasm', 'readwrite');
+        tx.objectStore('wasm').put(buffer, WASM_KEY);
+      } catch (e2) {}
+    };
+  } catch (e) {}
+}
+
+function loadWasmShard(url) {
+  return new Promise(function(resolve, reject) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', url, true);
+    xhr.responseType = 'arraybuffer';
+    xhr.timeout = WASM_SHARD_TIMEOUT;
+    var tid = setTimeout(function() { xhr.abort(); reject(new Error('Timeout loading ' + url)); }, WASM_SHARD_TIMEOUT);
+    xhr.onload = function() {
+      clearTimeout(tid);
+      if (xhr.status === 200) {
+        resolve(new Uint8Array(xhr.response));
+      } else {
+        reject(new Error('HTTP ' + xhr.status + ' loading ' + url));
+      }
+    };
+    xhr.onerror = function() { clearTimeout(tid); reject(new Error('Error loading ' + url)); };
+    xhr.ontimeout = function() { clearTimeout(tid); reject(new Error('Timeout loading ' + url)); };
+    xhr.send();
+  });
+}
+
+async function loadPikafishWasm() {
+  console.log('[Pikafish] Starting WASM loading (IndexedDB cache)...');
+  var cached = await getCachedWasm();
+  if (cached && cached.byteLength > 10000000) {
+    window._pikaWasmBinary = cached;
+    console.log('[Pikafish] Using cached WASM from IndexedDB, size:', cached.byteLength);
+    return;
+  }
+
+  console.log('[Pikafish] Downloading WASM parts (sequential)...');
+  var parts = [];
+  var totalStart = Date.now();
+  for (var i = 0; i < 3; i++) {
+    var url = '/js/pikafish.wasm.part' + i + '?v=2';
+    if (Date.now() - totalStart > WASM_TOTAL_TIMEOUT) {
+      throw new Error('Total WASM loading timeout');
+    }
+    console.log('[Pikafish] Loading part ' + (i + 1) + '/3: ' + url);
+    var part = null;
+    var lastErr = null;
+    for (var retry = 0; retry < 2; retry++) {
+      try {
+        if (retry > 0) console.log('[Pikafish] Retrying part ' + i + '...');
+        part = await loadWasmShard(url);
+        break;
+      } catch (e) {
+        lastErr = e;
+        if (retry === 0) console.warn('[Pikafish] Part ' + i + ' failed, will retry: ' + e.message);
+      }
+    }
+    if (!part) throw new Error('Failed to load ' + url + ': ' + (lastErr ? lastErr.message : 'unknown'));
+    parts.push(part);
+    console.log('[Pikafish] Part ' + i + ' loaded, size:', part.byteLength);
+  }
+
+  var totalSize = 0;
+  for (var i = 0; i < parts.length; i++) { totalSize += parts[i].byteLength; }
+  var merged = new Uint8Array(totalSize);
+  var offset = 0;
+  for (var i = 0; i < parts.length; i++) {
+    merged.set(parts[i], offset);
+    offset += parts[i].byteLength;
+  }
+  window._pikaWasmBinary = merged.buffer;
+  saveCachedWasm(merged.buffer);
+  console.log('[Pikafish] WASM merged, total size:', merged.byteLength);
+}
+
+// 异步加载 WASM
+loadPikafishWasm().then(function() {
+  console.log('[Pikafish] WASM ready');
+}).catch(function(e) {
+  console.error('[Pikafish] WASM loading failed:', e.message);
+});
+
+// ========== NNUE 加载 (IndexedDB 缓存 + 分片加载) ==========
+var NNUE_DB = 'pikafish_nnue_cache';
+// v162: v10 cache holds official Pikafish 2026-01-02 NNUE (53212941 bytes ZSTD).
+// Downloaded directly from https://github.com/official-pikafish/Pikafish/releases
+// Engine uses read_compressed_nnue() which reads via std::ifstream then ZSTD decompresses.
+var NNUE_KEY = 'pikafish_nnue_v10';
+
+function getCachedNnue() {
+  return new Promise(function(resolve) {
+    try {
+      var req = indexedDB.open(NNUE_DB, 1);
+      req.onupgradeneeded = function(e) { e.target.result.createObjectStore('nnue'); };
+      req.onsuccess = function(e) {
+        var db = e.target.result;
+        try {
+          var tx = db.transaction('nnue', 'readonly');
+          var store = tx.objectStore('nnue');
+          var getReq = store.get(NNUE_KEY);
+          getReq.onsuccess = function() { resolve(getReq.result || null); };
+          getReq.onerror = function() { resolve(null); };
+        } catch (e2) { resolve(null); }
+      };
+      req.onerror = function() { resolve(null); };
+    } catch (e) { resolve(null); }
+  });
+}
+
+function saveCachedNnue(buffer) {
+  try {
+    var req = indexedDB.open(NNUE_DB, 1);
+    req.onupgradeneeded = function(e) { e.target.result.createObjectStore('nnue'); };
+    req.onsuccess = function(e) {
+      try {
+        var tx = e.target.result.transaction('nnue', 'readwrite');
+        tx.objectStore('nnue').put(buffer, NNUE_KEY);
+      } catch (e2) {}
+    };
+  } catch (e) {}
+}
+
+// v100: 加载 gzip 压缩的 NNUE 分片并解压
+// 之前 loadWasmShard 不解压 gzip, 导致 NNUE 只有 51MB (压缩后) 而非 66MB (原始)
+async function loadGzipShard(url) {
+  var resp = await fetch(url);
+  if (!resp.ok) throw new Error('HTTP ' + resp.status + ' loading ' + url);
+  var compressed = await resp.arrayBuffer();
+  // 使用浏览器原生 DecompressionStream 解压 gzip
+  if (typeof DecompressionStream !== 'undefined') {
+    var ds = new DecompressionStream('gzip');
+    var stream = new Blob([compressed]).stream().pipeThrough(ds);
+    var decompressed = await new Response(stream).arrayBuffer();
+    return new Uint8Array(decompressed);
+  }
+  // fallback: 如果不支持 DecompressionStream, 返回原始数据 (可能不正确)
+  console.warn('[Pikafish] DecompressionStream not available, returning compressed data for', url);
+  return new Uint8Array(compressed);
+}
+
+async function loadPikafishNnue() {
+  console.log('[Pikafish] Starting NNUE loading (IndexedDB cache)...');
+  var cached = await getCachedNnue();
+  // v162: Official NNUE from Pikafish 2026-01-02 is exactly 53212941 bytes
+  if (cached && cached.byteLength === 53212941) {
+    window._pikaNnueBinary = cached;
+    console.log('[Pikafish] Using cached NNUE from IndexedDB, size:', cached.byteLength);
+    return;
+  }
+  if (cached) {
+    console.log('[Pikafish] Cached NNUE size mismatch (' + cached.byteLength + ' bytes), re-downloading...');
+  }
+
+  console.log('[Pikafish] Downloading NNUE ZSTD parts (sequential)...');
+  var parts = [];
+  var totalStart = Date.now();
+  for (var i = 0; i < 3; i++) {
+    var url = '/pikafish.nnue.part' + i + '?v=' + Date.now();
+    if (Date.now() - totalStart > WASM_TOTAL_TIMEOUT) {
+      throw new Error('Total NNUE loading timeout');
+    }
+    console.log('[Pikafish] Loading NNUE part ' + (i + 1) + '/3: ' + url);
+    var part = null;
+    var lastErr = null;
+    for (var retry = 0; retry < 5; retry++) {
+      try {
+        if (retry > 0) {
+          console.log('[Pikafish] Retrying NNUE part ' + i + ' (attempt ' + (retry + 1) + ')...');
+          await new Promise(function(r) { setTimeout(r, 2000); });
+        }
+        var resp = await fetch(url);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        part = new Uint8Array(await resp.arrayBuffer());
+        break;
+      } catch (e) {
+        lastErr = e;
+        console.warn('[Pikafish] NNUE part ' + i + ' failed (attempt ' + (retry + 1) + '): ' + e.message);
+      }
+    }
+    if (!part) throw new Error('Failed to load ' + url + ': ' + (lastErr ? lastErr.message : 'unknown'));
+    parts.push(part);
+    console.log('[Pikafish] NNUE part ' + i + ' loaded, size:', part.byteLength);
+  }
+
+  var totalSize = 0;
+  for (var i = 0; i < parts.length; i++) { totalSize += parts[i].byteLength; }
+  var merged = new Uint8Array(totalSize);
+  var offset = 0;
+  for (var i = 0; i < parts.length; i++) {
+    merged.set(parts[i], offset);
+    offset += parts[i].byteLength;
+  }
+  window._pikaNnueBinary = merged.buffer;
+  saveCachedNnue(merged.buffer);
+  console.log('[Pikafish] NNUE merged, total size:', merged.byteLength);
+}
+
+// 异步加载 NNUE (与 WASM 并行)
+loadPikafishNnue().then(function() {
+  console.log('[Pikafish] NNUE ready');
+}).catch(function(e) {
+  console.error('[Pikafish] NNUE loading failed:', e.message);
+});
+
+// pikafish-engine.js 加载完成后标记
+window._pikafishScriptsResolve();
+window._pikafishScriptsReady = true;
+console.log('[Pikafish] Engine script loaded (Worker mode)');
 var PN={king:{red:'帅',black:'将'},advisor:{red:'仕',black:'士'},elephant:{red:'相',black:'象'},horse:{red:'馬',black:'馬'},rook:{red:'車',black:'車'},cannon:{red:'炮',black:'砲'},pawn:{red:'兵',black:'卒'}};
 var PV={king:10000,rook:1150,cannon:530,horse:430,elephant:140,advisor:140,pawn:48};
 // 变更日志：AI学习功能 - 可调整的评估函数权重（方案B：根据对弈结果自动调整）
@@ -337,6 +588,21 @@ fetch(aiServerUrl,{headers:{Authorization:aiServerAuth}})
 .then(function(data){
 if(data&&data.history&&Array.isArray(data.history)){
 localStorage.setItem('aiGameHistory',JSON.stringify(data.history));
+}
+// v2: 合并服务端训练权重（跨设备继承快速训练成果）——每次页面加载仅执行一次
+if(data&&data.weights&&!fetchAiDataFromServer._wMerged){
+fetchAiDataFromServer._wMerged=true;
+var changed=false;
+for(var k in data.weights){
+if(aiWeights[k]!==undefined&&typeof data.weights[k]==='number'&&isFinite(data.weights[k])){
+aiWeights[k]=Math.max(1,Math.min(500,aiWeights[k]*0.3+data.weights[k]*0.7));
+changed=true;
+}
+}
+if(changed){
+saveAiWeights();
+console.log('AI训练权重已从服务器合并继承');
+}
 }
 })
 .catch(function(){console.log('Failed to fetch AI data from server');});
@@ -657,7 +923,7 @@ var gameStarted=false,selected=null,validMoves=[],capRed=[],capBlk=[],undoUsed=f
 var timerId=null,secs=0;
 var clickCount=0;
 var socket=null,sockOk=false,gm='local',myCl=null,myRm=null;
-  var pendingMove=null,pendingRetryTimer=null; // 本地已走、待服务端确认的走棋（防"刚走的棋回退"，对齐 xq-cloudflare）
+var pendingMove=null,pendingRetryTimer=null; // 本地已走、待服务端确认的走棋（用于防止 room_state 全量同步覆盖）
 var aiThinking=false,aiTimeout=null,aiWorker=null;
 var aiCl='black'; // AI执棋颜色：'black'或'red'，与myCl相反
 var checkStreak=0,lastCheckColor=null; // 长将追踪：连续将军次数
@@ -704,6 +970,8 @@ var D=function(id){return document.getElementById(id);};
 		}
 	}).catch(function(e){console.error('initTrainStats fetch error:',e);});
 })();
+// 启动时恢复训练权重：先读回本机localStorage，再由fetchAiDataFromServer合并服务端全局成果
+loadAiWeights();
 
 var soundEnabled=true,gameOverSoundPlayed=false;
 var audioCtx=null;
@@ -756,15 +1024,31 @@ var ctx=cv.getContext('2d');
 ctx.setTransform(1,0,0,1,0,0);
 ctx.scale(window.devicePixelRatio||1,window.devicePixelRatio||1);
 var ps=w*0.04,bw=w-ps*2,bh=h-ps*2;cs=bw/8;bx=ps;by=ps;
-ctx.fillStyle='#e8c97a';ctx.fillRect(ps-cs*0.1,ps-cs*0.1,bw+cs*0.2,bh+cs*0.2);
-ctx.fillStyle='#d4a056';ctx.fillRect(ps,ps,bw,bh);
-ctx.strokeStyle='#5a3a1a';ctx.lineWidth=1;
-for(var r=0;r<10;r++){var y=ps+r*(bh/9);ctx.beginPath();ctx.moveTo(ps,y);if(r===0||r===9)ctx.lineTo(ps+bw,y);else{ctx.lineTo(ps+bw/2,y);ctx.stroke();ctx.beginPath();ctx.moveTo(ps+bw/2,y);ctx.lineTo(ps+bw,y);}ctx.stroke();}
-for(var c=0;c<9;c++){var x=ps+c*(bw/8);ctx.beginPath();ctx.moveTo(x,ps);if(c===0||c===8)ctx.lineTo(x,ps+bh);else{ctx.lineTo(x,ps+bh*4/9);ctx.stroke();ctx.beginPath();ctx.moveTo(x,ps+bh*5/9);ctx.lineTo(x,ps+bh);}ctx.stroke();}
+var wood=ctx.createLinearGradient(0,ps,0,ps+bh);wood.addColorStop(0,'#c28e56');wood.addColorStop(0.5,'#e8c99a');wood.addColorStop(1,'#e0b383');
+ctx.fillStyle='#d4a56a';ctx.fillRect(ps-cs*0.1,ps-cs*0.1,bw+cs*0.2,bh+cs*0.2);
+ctx.fillStyle=wood;ctx.fillRect(ps,ps,bw,bh);
+ctx.strokeStyle='#9c7550';ctx.lineWidth=1.5;
+for(var r=0;r<10;r++){var y=ps+r*(bh/9);ctx.beginPath();ctx.moveTo(ps,y);if(r===0||r===9)ctx.lineWidth=2.5;else ctx.lineWidth=1.5;ctx.lineTo(ps+bw,y);ctx.stroke();}
+for(var c=0;c<9;c++){var x=ps+c*(bw/8);ctx.beginPath();ctx.moveTo(x,ps);if(c===0||c===8){ctx.lineWidth=2.5;ctx.lineTo(x,ps+bh);}else{ctx.lineWidth=1.5;ctx.lineTo(x,ps+bh*4/9);}ctx.stroke();if(c!==0&&c!==8){ctx.beginPath();ctx.moveTo(x,ps+bh*5/9);ctx.lineTo(x,ps+bh);ctx.stroke();}}
+ctx.strokeStyle='#9c7550';ctx.lineWidth=1.5;
 ctx.beginPath();ctx.moveTo(ps+bw*3/8,ps);ctx.lineTo(ps+bw*5/8,ps+bh*2/9);ctx.moveTo(ps+bw*5/8,ps);ctx.lineTo(ps+bw*3/8,ps+bh*2/9);ctx.stroke();
 ctx.beginPath();ctx.moveTo(ps+bw*3/8,ps+bh*7/9);ctx.lineTo(ps+bw*5/8,ps+bh);ctx.moveTo(ps+bw*5/8,ps+bh*7/9);ctx.lineTo(ps+bw*3/8,ps+bh);ctx.stroke();
-ctx.font='bold '+cs*0.26+'px serif';ctx.fillStyle='#5a3a1a';ctx.textAlign='center';ctx.textBaseline='middle';
+ctx.font='bold '+cs*0.26+'px serif';ctx.fillStyle='#8b6914';ctx.textAlign='center';ctx.textBaseline='middle';
 ctx.fillText('楚  河',ps+bw/2,ps+bh*8.5/18);ctx.fillText('汉  界',ps+bw/2,ps+bh*9.5/18);
+ctx.fillStyle='#9c7550';
+ctx.strokeStyle='#9c7550';ctx.lineWidth=1.2;
+var stL=cs*0.16;
+var starRow=function(r){return ps+r*(bh/9);},starCol=function(c){return ps+c*(bw/8);};
+var starPts=[[2,1],[2,7],[7,1],[7,7],[3,0],[3,2],[3,4],[3,6],[3,8],[6,0],[6,2],[6,4],[6,6],[6,8]];
+for(var si=0;si<starPts.length;si++){
+  var sy=starRow(starPts[si][0]),sx=starCol(starPts[si][1]);
+  ctx.strokeStyle='#a07840';ctx.lineWidth=0.8;
+  var d=cs*0.08;
+  ctx.beginPath();ctx.moveTo(sx-d-stL,sy-d);ctx.lineTo(sx-d,sy-d);ctx.lineTo(sx-d,sy-d-stL);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(sx+d+stL,sy-d);ctx.lineTo(sx+d,sy-d);ctx.lineTo(sx+d,sy-d-stL);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(sx-d-stL,sy+d);ctx.lineTo(sx-d,sy+d);ctx.lineTo(sx-d,sy+d+stL);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(sx+d+stL,sy+d);ctx.lineTo(sx+d,sy+d);ctx.lineTo(sx+d,sy+d+stL);ctx.stroke();
+}
 }
 
 function pos(r,c){if(boardFlip)r=9-r;return{x:bx+c*cs,y:by+r*cs};}
@@ -863,8 +1147,20 @@ if(rs.captured){sndCapture();if(rs.captured.color==='red')capRed.push(rs.capture
 else{sndMove();}
 selected=null;validMoves=[];lastMove={row:tr,col:tc};render();
 D('turnText').textContent=engine.currentTurn==='red'?'红方走棋':'黑方走棋';
-if(gm==='online'&&sockOk){socket.emit('make_move',{fromRow:fr,fromCol:fc,toRow:tr,toCol:tc,captured:rs.captured,pieceColor:mc,currentTurn:engine.currentTurn,gameOver:engine.gameOver,winner:engine.winner,redLeft:redLeft,blkLeft:blkLeft});saveGameState();}
-if(gm==='ai'||gm==='cloudai')saveGameState();
+if(gm==='online'&&sockOk){
+pendingMove={fromRow:fr,fromCol:fc,toRow:tr,toCol:tc,captured:rs.captured,pieceColor:mc,currentTurn:engine.currentTurn,gameOver:engine.gameOver,winner:engine.winner,redLeft:redLeft,blkLeft:blkLeft};
+socket.emit('make_move',pendingMove);
+saveGameState();
+// 3秒内未收到 move_ack 则自动补发（防消息丢失导致回退），服务端有幂等判断不会重复走棋
+if(pendingRetryTimer)clearTimeout(pendingRetryTimer);
+pendingRetryTimer=setTimeout(function(){
+var pm=pendingMove;
+if(pm&&sockOk&&socket&&socket.connected){
+socket.emit('make_move',{fromRow:pm.fromRow,fromCol:pm.fromCol,toRow:pm.toRow,toCol:pm.toCol,captured:pm.captured,pieceColor:pm.pieceColor,currentTurn:pm.currentTurn,gameOver:pm.gameOver,winner:pm.winner,redLeft:pm.redLeft,blkLeft:pm.blkLeft});
+}
+},3000);
+}
+if(gm==='ai'||gm==='pikafish')saveGameState();
 if(engine.gameOver){
 	sndGameOver();stopTimer();
 	var wt=engine.winner==='red'?'红方':'黑方';
@@ -883,7 +1179,7 @@ if(engine.gameOver){
 		console.log('学习率:',learningRate);
 		clearGameState();
 	}
-	if(gm==='cloudai'){ clearGameState(); }
+	if(gm==='pikafish'){ clearGameState(); }
 	return;
 }
 
@@ -898,9 +1194,9 @@ if(rs.check){
 	checkStreak=0;lastCheckColor=null;
 }
 
-if((gm==='ai'||gm==='cloudai')&&!engine.gameOver&&engine.currentTurn===aiCl){
+if((gm==='ai'||gm==='pikafish')&&!engine.gameOver&&engine.currentTurn===aiCl){
 if(gm==='ai')startAiThink();
-else if(gm==='cloudai')cloudAiThink();
+else if(gm==='pikafish')pikafishDeepThink();
 }
 }
 
@@ -916,16 +1212,16 @@ showOverlay('<h2>💪 再接再厉</h2><p>AI获胜，请重新挑战</p><div cla
 }else{
 showOverlay('<h2>🤝 和棋</h2><p>双方握手言和</p><div class="btns2"><button class="btn btn-green" style="width:auto;padding:10px 20px;font-size:14px" onclick="retryAiGame()">再来一局</button><button class="btn btn-outline" style="width:auto;padding:10px 20px;font-size:14px" onclick="leaveGame()">返回</button></div>');
 }
-}else if(gm==='cloudai'){
+}else if(gm==='pikafish'){
 if(engine.winner===aiCl)recordGameResult('aiWin');
 else if(engine.winner===myCl)recordGameResult('aiLose');
 else if(engine.winner==='draw')recordGameResult('draw');
 if(engine.winner===myCl){
-showOverlay('<h2>🎉 你赢了!</h2><p>恭喜战胜云端AI!</p><div class="btns2"><button class="btn btn-green" style="width:auto;padding:10px 20px;font-size:14px" onclick="retryCloudAiGame()">再来一局</button><button class="btn btn-outline" style="width:auto;padding:10px 20px;font-size:14px" onclick="leaveGame()">返回</button></div>');
+showOverlay('<h2>🎉 你赢了!</h2><p>恭喜战胜Pikafish!</p><div class="btns2"><button class="btn btn-green" style="width:auto;padding:10px 20px;font-size:14px" onclick="retryPikafishGame()">再来一局</button><button class="btn btn-outline" style="width:auto;padding:10px 20px;font-size:14px" onclick="leaveGame()">返回</button></div>');
 }else if(engine.winner===aiCl){
-showOverlay('<h2>💪 再接再厉</h2><p>云端AI获胜，请重新挑战</p><div class="btns2"><button class="btn btn-green" style="width:auto;padding:10px 20px;font-size:14px" onclick="retryCloudAiGame()">再来一局</button><button class="btn btn-outline" style="width:auto;padding:10px 20px;font-size:14px" onclick="leaveGame()">返回</button></div>');
+showOverlay('<h2>💪 再接再厉</h2><p>Pikafish获胜，请重新挑战</p><div class="btns2"><button class="btn btn-green" style="width:auto;padding:10px 20px;font-size:14px" onclick="retryPikafishGame()">再来一局</button><button class="btn btn-outline" style="width:auto;padding:10px 20px;font-size:14px" onclick="leaveGame()">返回</button></div>');
 }else{
-showOverlay('<h2>🤝 和棋</h2><p>双方握手言和</p><div class="btns2"><button class="btn btn-green" style="width:auto;padding:10px 20px;font-size:14px" onclick="retryCloudAiGame()">再来一局</button><button class="btn btn-outline" style="width:auto;padding:10px 20px;font-size:14px" onclick="leaveGame()">返回</button></div>');
+showOverlay('<h2>🤝 和棋</h2><p>双方握手言和</p><div class="btns2"><button class="btn btn-green" style="width:auto;padding:10px 20px;font-size:14px" onclick="retryPikafishGame()">再来一局</button><button class="btn btn-outline" style="width:auto;padding:10px 20px;font-size:14px" onclick="leaveGame()">返回</button></div>');
 }
 }else if(gm==='local'){
 showOverlay('<h2>🏆 '+wt+'获胜!</h2><p>恭喜'+wt+'!</p><div class="btns2"><button class="btn btn-green" style="width:auto;padding:10px 20px;font-size:14px" onclick="localRestart()">再来一局</button><button class="btn btn-outline" style="width:auto;padding:10px 20px;font-size:14px" onclick="leaveGame()">退出</button></div>');
@@ -956,6 +1252,7 @@ if(gm==='online'&&sockOk)socket.emit('resign');}
 function doDrawReq(){if(!gameStarted||engine.gameOver)return;if(gm==='online'&&sockOk)socket.emit('request_draw');toast('已发送求和请求');}
 function accDraw(){hideOverlay();engine.gameOver=true;engine.winner='draw';stopTimer();showGameOver('和棋');if(sockOk)socket.emit('accept_draw');}
 function rejDraw(){hideOverlay();if(sockOk)socket.emit('reject_draw');}
+function acceptRematch(){socket.emit('accept_rematch');}
 
 function doUndo(){
 if(!gameStarted||engine.gameOver)return;
@@ -966,7 +1263,7 @@ if(gm==='online'&&sockOk){
 if(last.piece.color!==myCl){toast('只能悔自己的棋',1500);return;}
 socket.emit('request_undo');
 toast('已发送悔棋请求',1500);
-}else if(gm==='ai'||gm==='cloudai'){
+}else if(gm==='ai'||gm==='pikafish'){
 confirmUndoAi();
 }else if(gm==='local'){
 var undoCl=last.piece.color==='red'?'红方':'黑方';
@@ -1027,16 +1324,8 @@ else if(document.webkitExitFullscreen)document.webkitExitFullscreen();
 soundEnabled=false;gameOverSoundPlayed=false;
 if(audioCtx){try{audioCtx.close();}catch(e){}audioCtx=null;}
 stopTimer();stopAi();gameStarted=false;selected=null;validMoves=[];capRed=[];capBlk=[];lastMove=null;engine.initBoard();
-// 关键：先保存旧 socket 引用，再发 leave_room，然后立即关闭旧连接
-// 不能等 setTimeout，因为 connectSocket() 会覆盖 socket 变量！
-var oldSocket = socket;
-if(gm==='online'&&sockOk && oldSocket){
-try{oldSocket.emit('leave_room');}catch(e){}
-setTimeout(function(){if(oldSocket){try{oldSocket.disconnect();}catch(e){}}}, 100);
-}else{
-if(oldSocket){try{oldSocket.disconnect();}catch(e){}}
-}
-socket=null; sockOk=false;
+if(gm==='online'&&sockOk){try{socket.emit('leave_room');}catch(e){}}
+if(socket){try{socket.disconnect();}catch(e){}socket=null;sockOk=false;}
 gm='local';myCl=null;myRm=null;boardFlip=false;D('drawBtn').style.display='none';
 D('game').classList.remove('show');D('lobby').classList.remove('hide');
 D('redName').textContent='红方';D('blackName').textContent='黑方';
@@ -1052,14 +1341,8 @@ else if(document.webkitExitFullscreen)document.webkitExitFullscreen();
 soundEnabled=false;gameOverSoundPlayed=false;
 if(audioCtx){try{audioCtx.close();}catch(e){}audioCtx=null;}
 stopTimer();stopAi();gameStarted=false;selected=null;validMoves=[];capRed=[];capBlk=[];lastMove=null;engine.initBoard();
-var oldSocket = socket;
-if(gm==='online'&&sockOk && oldSocket){
-try{oldSocket.emit('leave_room');}catch(e){}
-setTimeout(function(){if(oldSocket){try{oldSocket.disconnect();}catch(e){}}},100);
-}else{
-if(oldSocket){try{oldSocket.disconnect();}catch(e){}}
-}
-socket=null; sockOk=false;
+if(gm==='online'&&sockOk){try{socket.emit('leave_room');}catch(e){}}
+if(socket){try{socket.disconnect();}catch(e){}socket=null;sockOk=false;}
 gm='local';myCl=null;myRm=null;boardFlip=false;D('drawBtn').style.display='none';
 D('game').classList.remove('show');D('lobby').classList.remove('hide');
 D('redName').textContent='红方';D('blackName').textContent='黑方';
@@ -1073,7 +1356,7 @@ clickCount++;
 if(!gameStarted||engine.gameOver)return;
 if(aiThinking)return;
 if(gm==='online'&&engine.currentTurn!==myCl)return;
-if((gm==='ai'||gm==='cloudai')&&engine.currentTurn!==myCl)return;
+if((gm==='ai'||gm==='pikafish')&&engine.currentTurn!==myCl)return;
 var p=engine.gp(r,c);
 if(!p){if(selected&&validMoves.some(function(m){return m.row===r&&m.col===c;})){doMove(selected.row,selected.col,r,c);}else{selected=null;validMoves=[];render();}return;}
 if(p.color===engine.currentTurn){
@@ -1098,14 +1381,14 @@ if(r>=0&&r<=9&&c>=0&&c<=8)cellClick(r,c);
 
 function newGame(){
 if(gm==='online'&&sockOk){
-socket.emit('rematch');
-showToast('正在请求重新对局...');
+socket.emit('rematch_request');
+showOverlay('<h2>等待对方确认...</h2><p>对方是否同意再来一局</p><div class="btns2"><button class="btn btn-outline" style="width:auto;padding:10px 20px;font-size:14px" onclick="leaveGame()">退出</button></div>');
 return;
 }
 soundEnabled=true;gameOverSoundPlayed=false;undoUsed=false;
 hideOverlay();
 if(gm==='ai'){retryAiGame();return;}
-if(gm==='cloudai'){retryCloudAiGame();return;}
+if(gm==='pikafish'){retryPikafishGame();return;}
 if(gm==='local'){boardFlip=Math.random()<0.5;myCl=boardFlip?'black':'red';
 D('redName').textContent=myCl==='red'?'你（红方）':'对手（红方）';D('blackName').textContent=myCl==='black'?'你（黑方）':'对手（黑方）';}
 engine.initBoard();engine.currentTurn='red';engine.gameOver=false;engine.winner=null;engine.moveHistory=[];
@@ -1117,8 +1400,10 @@ drawBoardBg();render();startTimer();sndStart();
 function createRoom(){
 if(!sockOk){D('lobbyStatus').textContent='服务器未连接，请稍候再试';return;}
 var customId=D('createInput').value.trim().toUpperCase();
+// 轮换先手：读取上一盘自己执的颜色，服务端将分配相反颜色
+var lastColor=null;try{lastColor=localStorage.getItem('xq_last_color');}catch(e){}
 D('lobbyStatus').textContent='正在创建房间...';
-socket.emit('create_room',customId||null);
+socket.emit('create_room',{roomId:customId||null,lastColor:lastColor});
 }
 function joinRoom(){
 if(!sockOk){D('lobbyStatus').textContent='服务器未连接，请稍候再试';return;}
@@ -1136,11 +1421,10 @@ if(socket){try{socket.disconnect();}catch(e){}socket=null;}
 socket=io({transports:['websocket','polling'],reconnection:true,reconnectionAttempts:Infinity,reconnectionDelay:1000,timeout:8000,pingTimeout:8000,pingInterval:4000,randomizationFactor:0});
 socket.on('connect',function(){sockOk=true;D('lobbyStatus').textContent='● 服务器已连接';D('footerText').textContent='人机对弈需联网 | 在线模式两人对战';
 hideReconnecting();
-// 清除 pendingMove（重连时 pendingMove 已无效）
-pendingMove=null;if(pendingRetryTimer){clearTimeout(pendingRetryTimer);pendingRetryTimer=null;}
 var isPageReload=!!window._pendingReconnect;
 if(window._pendingRoomAction&&socket.roomId){var pa=window._pendingRoomAction;window._pendingRoomAction=null;
  if(pa.action==='reconnect'){socket.emit('reconnect_room',{roomId:pa.roomId,color:pa.color});}
+ else if(pa.action==='create'){socket.emit('create_room',{roomId:pa.roomId,lastColor:pa.lastColor||null});}
  else{socket.emit(pa.action+'_room',pa.roomId);}
 }
 else if(window._pendingReconnect){var pr=window._pendingReconnect;if(pr.redLeft!==undefined){redLeft=pr.redLeft;blkLeft=pr.blkLeft;}window._pendingReconnect=null;socket.emit('reconnect_room',{roomId:pr.myRm,color:pr.myCl});}
@@ -1152,7 +1436,8 @@ socket.on('ping',function(){socket.emit('pong');});
 socket.on('connect_error',function(){sockOk=false;D('lobbyStatus').textContent='○ 连接失败（本地模式可用）';});
 socket.on('online_count',function(count){D('onlineCount').textContent='当前在线: '+count+' 人';});
 socket.on('room_created',function(d){
-myRm=d.roomId;gm='online';
+myRm=d.roomId;myCl=d.color;gm='online';
+try{localStorage.setItem('xq_last_color',d.color);}catch(e){} // 记录本盘颜色，下一盘轮换先手
 D('lobbyStatus').innerHTML='房间号: <strong style="font-size:20px;color:#d4a843;letter-spacing:3px;">'+d.roomId+'</strong>';
 enterOnlineGame(d.roomId,d.color);
 D('turnText').textContent='等待对手加入...';
@@ -1162,7 +1447,8 @@ window._pendingRoomAction=d;
 socket.reconnectToRoom(d.roomId);
 });
 socket.on('room_joined',function(d){
-myRm=d.roomId;gm='online';D('lobbyStatus').textContent='';
+myRm=d.roomId;myCl=d.color;gm='online';D('lobbyStatus').textContent='';
+try{localStorage.setItem('xq_last_color',d.color);}catch(e){} // 记录本盘颜色，下一盘轮换先手
 enterOnlineGame(d.roomId,d.color);
 });
 socket.on('game_start',function(d){
@@ -1253,34 +1539,9 @@ socket.on('player_reconnected',function(d){
 	if(window._dcTimer){clearInterval(window._dcTimer);window._dcTimer=null;}
 	hideOverlay();hideReconnecting();
 });
-socket.on('game_state',function(d){
-if(!d||!d.roomId||!d.color)return;
-// 收到 game_state 表示重连成功，恢复棋盘
-myRm=d.roomId;gm='online';myCl=d.color;
-boardFlip=(myCl==='black');
-D('drawBtn').style.display='inline-flex';
-D('redName').textContent=myCl==='red'?'你（红方）':'对手（红方）';
-D('blackName').textContent=myCl==='black'?'你（黑方）':'对手（黑方）';
-D('modeBadge').textContent='房间: '+d.roomId;
-engine.initBoard();engine.currentTurn='red';engine.gameOver=false;engine.winner=null;engine.moveHistory=[];
-capRed=[];capBlk=[];lastMove=null;
-if(d.moveHistory&&d.moveHistory.length>0){
-for(var i=0;i<d.moveHistory.length;i++){var m=d.moveHistory[i];var rs=engine.move(m.fromRow,m.fromCol,m.toRow,m.toCol);if(rs&&rs.captured){if(rs.captured.color==='red')capRed.push(rs.captured);else capBlk.push(rs.captured);}}
-if(d.moveHistory.length>0){var lm=d.moveHistory[d.moveHistory.length-1];lastMove={row:lm.toRow,col:lm.toCol};}
-}
-engine.currentTurn=d.currentTurn||'red';engine.gameOver=d.gameOver||false;engine.winner=d.winner||null;
-if(d.gameStarted!==undefined)gameStarted=d.gameStarted;else gameStarted=(d.moveHistory&&d.moveHistory.length>0);
-if(d.capturedRed)capRed=d.capturedRed;if(d.capturedBlack)capBlk=d.capturedBlack;
-if(d.redTime!=null){redLeft=d.redTime;blkLeft=d.blkTime;}
-selected=null;validMoves=[];
-D('turnText').textContent=gameStarted?(engine.currentTurn==='red'?'红方走棋':'黑方走棋'):'等待对手加入...';
-if(gameStarted){stopTimer();if(redLeft<=0||blkLeft<=0){redLeft=900;blkLeft=900;}timerId=setInterval(function(){if(engine.gameOver){stopTimer();return;}if(engine.currentTurn==='red'){redLeft=Math.max(0,redLeft-1);}else{blkLeft=Math.max(0,blkLeft-1);}updateTimers();if(redLeft<=0){stopTimer();engine.gameOver=true;engine.winner='black';sndGameOver();showGameOver('黑方');clearGameState();}else if(blkLeft<=0){stopTimer();engine.gameOver=true;engine.winner='red';sndGameOver();showGameOver('红方');clearGameState();}},1000);updateTimers();}
-requestAnimationFrame(function(){drawBoardBg();render();});
-hideOverlay();hideReconnecting();
-saveGameState();
-});
 socket.on('room_state',function(d){
-myRm=d.roomId;gm='online';
+myRm=d.roomId;myCl=d.color;gm='online';
+try{localStorage.setItem('xq_last_color',d.color);}catch(e){} // 重连/换先后同步本盘颜色
 D('lobby').classList.add('hide');D('game').classList.add('show');
 D('modeBadge').textContent='房间: '+d.roomId;
 D('redName').textContent=myCl==='red'?'你（红方）':'对手（红方）';
@@ -1295,9 +1556,7 @@ if(!isPageReload&&pendingMove&&engine.moveHistory.length===d.moveHistory.length+
 var _lp=engine.moveHistory[engine.moveHistory.length-1];
 if(_lp&&_lp.fromRow===pendingMove.fromRow&&_lp.fromCol===pendingMove.fromCol&&_lp.toRow===pendingMove.toRow&&_lp.toCol===pendingMove.toCol){localPendingAhead=true;}
 }
-// 修复Bug2：游戏已结束（认输/求和/将死）后收到room_state，视为rematch/新局，强制执行重置
-var isRematchReset=(engine.gameOver&&d.moveHistory&&d.moveHistory.length===0);
-if(engine.gameOver&&!isPageReload&&!isRematchReset){
+if(engine.gameOver&&!isPageReload){
 if(!localPendingAhead){
 engine.gameOver=d.gameOver;engine.winner=d.winner;
 if(d.gameStarted!==undefined){gameStarted=d.gameStarted;}else{gameStarted=(d.moveHistory&&d.moveHistory.length>0);}
@@ -1310,9 +1569,8 @@ return;
 }
 // 全量同步：当本地历史与服务器不一致时重新初始化，确保两个终端状态完全一致
 // 防御性检查：如果服务器历史为空但本地有历史，不重置（防止DO冷启动后状态丢失）
-// 修复Bug2：但在rematch场景（isRematchReset=true）时强制重置
-if(engine.moveHistory.length!==d.moveHistory.length||isPageReload||isRematchReset){
-if(!(d.moveHistory.length===0&&engine.moveHistory.length>0&&!isPageReload&&!isRematchReset)){
+if(engine.moveHistory.length!==d.moveHistory.length||isPageReload){
+if(!(d.moveHistory.length===0&&engine.moveHistory.length>0&&!isPageReload)){
 // 如果仅差1步且非页面重载，增量应用缺失的走棋（避免全量同步导致的视觉闪烁）
 if(d.moveHistory.length===engine.moveHistory.length+1&&!isPageReload){
 var newMove=d.moveHistory[d.moveHistory.length-1];
@@ -1347,6 +1605,8 @@ if(d.moveHistory.length>0){var lm=d.moveHistory[d.moveHistory.length-1];lastMove
 if(!localPendingAhead){engine.gameOver=d.gameOver;engine.winner=d.winner;}
 if(!localPendingAhead){
 if(d.capturedRed)capRed=d.capturedRed;if(d.capturedBlack)capBlk=d.capturedBlack;
+}else{
+// 本地领先未确认：gameOver/captured 以本地为准（服务端尚未计入该步）
 }
 // 若服务端未提供 gameStarted，根据是否有走棋记录判断（向后兼容旧版服务端）
 if(d.gameStarted!==undefined){gameStarted=d.gameStarted;}else{gameStarted=(d.moveHistory&&d.moveHistory.length>0);}
@@ -1356,6 +1616,7 @@ if(d.redTime!=null){redLeft=d.redTime;blkLeft=d.blkTime;}
 if(gameStarted){stopTimer();if(redLeft<=0||blkLeft<=0){redLeft=900;blkLeft=900;}timerId=setInterval(function(){if(engine.gameOver){stopTimer();return;}if(engine.currentTurn==='red'){redLeft=Math.max(0,redLeft-1);}else{blkLeft=Math.max(0,blkLeft-1);}updateTimers();if(redLeft<=0){stopTimer();engine.gameOver=true;engine.winner='black';sndGameOver();showGameOver('黑方');clearGameState();}else if(blkLeft<=0){stopTimer();engine.gameOver=true;engine.winner='red';sndGameOver();showGameOver('红方');clearGameState();}},1000);updateTimers();}
 requestAnimationFrame(function(){drawBoardBg();render();});
 hideOverlay();hideReconnecting();
+
 saveGameState();
 });
 socket.on('opponent_left',function(){hideReconnecting();toast('棋局已结束',5000);setTimeout(function(){leaveGameSilent();},5000);});
@@ -1363,16 +1624,9 @@ socket.on('room_timeout',function(){hideReconnecting();toast('棋局已结束',5
 socket.on('draw_requested',function(){showOverlay('<h2>🤝 求和请求</h2><p>对手请求和棋</p><div class="btns2"><button class="btn btn-outline" style="width:auto;padding:8px 16px;font-size:13px" onclick="accDraw()">同意</button><button class="btn btn-red" onclick="rejDraw()">拒绝</button></div>');});
 socket.on('draw_rejected',function(){toast('对方拒绝了求和');});
 socket.on('rematch_requested',function(){showOverlay('<h2>对方请求再来一局</h2><p>是否同意重新开始？</p><div class="btns2"><button class="btn btn-green" style="width:auto;padding:10px 20px;font-size:14px" onclick="acceptRematch()">同意</button><button class="btn btn-outline" style="width:auto;padding:10px 20px;font-size:14px" onclick="leaveGame()">拒绝并退出</button></div>');});
-socket.on('rematch_start',function(d){
-hideOverlay();undoUsed=false;
-// 红黑交替轮换：更新自己的颜色（服务端单独发送 color 给每个玩家）
-if(d&&d.color){myCl=d.color;boardFlip=(myCl==='black');}
-D('redName').textContent=myCl==='red'?'你（红方）':'对手（红方）';
-D('blackName').textContent=myCl==='black'?'你（黑方）':'对手（黑方）';
-// room_state 事件会随后到达并重建棋盘
-});
+socket.on('rematch_start',function(){hideOverlay();undoUsed=false;pendingMove=null;if(pendingRetryTimer){clearTimeout(pendingRetryTimer);pendingRetryTimer=null;}engine.initBoard();engine.currentTurn='red';engine.gameOver=false;engine.winner=null;engine.moveHistory=[];capRed=[];capBlk=[];lastMove=null;selected=null;validMoves=[];gameStarted=true;clickCount=0;D('turnText').textContent='红方走棋';updateBoardSize();drawBoardBg();render();startTimer();toast('再来一局!',1500);sndStart();saveGameState();});
 socket.on('error', function(msg){
-    if(gm==='online'&&myRm&&(msg==='房间已不存在'||msg==='无法重连'||msg.indexOf('无法重连')===0)){
+    if(gm==='online'&&myRm&&(msg==='房间已不存在'||msg==='无法重连'||msg.indexOf('无法重连')>=0)){
         // 不自动退出，启动重连重试
         showReconnecting();
         if(!reconnectRetryTimer){reconnectRetryCount=0;startReconnectRetry();}
@@ -1395,7 +1649,7 @@ var reconnectRetryTimer=null,reconnectRetryCount=0,reconnectRetryMax=200;
 var disconnectTime=0;
 
 function saveGameState(){
-if(gm==='ai'||gm==='cloudai'){
+if(gm==='ai'||gm==='pikafish'){
 try{
 var st={gm:gm,myCl:myCl,aiCl:aiCl,currentTurn:engine.currentTurn,gameOver:engine.gameOver,winner:engine.winner,moveHistory:engine.moveHistory.slice(),capRed:capRed.slice(),capBlk:capBlk.slice(),redLeft:redLeft,blkLeft:blkLeft,lastMove:lastMove,undoUsed:undoUsed};
 localStorage.setItem('xq_game',JSON.stringify(st));
@@ -1464,7 +1718,7 @@ connectSocket();
 
 function enterOnlineGame(rid,cl){
 soundEnabled=true;gameOverSoundPlayed=false;undoUsed=false;
-myCl=cl;boardFlip=(cl==='black');D('lobby').classList.add('hide');D('game').classList.add('show');
+boardFlip=(cl==='black');D('lobby').classList.add('hide');D('game').classList.add('show');
 D('modeBadge').textContent='房间: '+rid;
 engine.initBoard();engine.currentTurn='red';engine.gameOver=false;engine.winner=null;engine.moveHistory=[];
 capRed=[];capBlk=[];lastMove=null;selected=null;validMoves=[];gameStarted=false;clickCount=0;
@@ -5447,7 +5701,157 @@ if(Date.now()-aiStartTime>aiMaxTime){timedOut=true;break;}
 	return bestMove;
 }
 
+// ========== 高级AI云库接入（chessdb.cn）：人机对弈AI优先走云库，失败回退本地引擎 ==========
+function boardToFen(board, currentTurn){
+	var pieceMap = {
+		king:   {red:'K', black:'k'},
+		advisor:{red:'A', black:'a'},
+		elephant:{red:'B', black:'b'},
+		horse:  {red:'N', black:'n'},
+		rook:   {red:'R', black:'r'},
+		cannon: {red:'C', black:'c'},
+		pawn:   {red:'P', black:'p'}
+	};
+	var fen = '';
+	for(var r = 0; r < 10; r++){
+		var empty = 0;
+		for(var c = 0; c < 9; c++){
+			var p = board[r][c];
+			if(p){
+				if(empty > 0){ fen += empty; empty = 0; }
+				fen += pieceMap[p.type][p.color];
+			} else {
+				empty++;
+			}
+		}
+		if(empty > 0) fen += empty;
+		if(r < 9) fen += '/';
+	}
+	fen += ' ' + (currentTurn === 'red' ? 'w' : 'b');
+	return fen;
+}
+
+function cloudQueryBest(fen, endgameOnly, callback){
+	// 通用querybest查询，endgameOnly=true时仅查残局库
+	var url = 'https://www.chessdb.cn/chessdb.php?action=querybest&board=' + encodeURIComponent(fen)
+		+ '&egtbmetric=dtm';
+	if(endgameOnly) url += '&endgame=1';
+
+	fetch(url)
+	.then(function(r){ return r.text(); })
+	.then(function(response){
+		response = (response || '').trim();
+		console.log('云库querybest' + (endgameOnly ? '(仅残局)' : '') + '返回:', response);
+
+		// 解析: move:[MOVE] / egtb:[MOVE] / search:[MOVE]
+		var moveStr = null;
+		if(response.indexOf('move:') === 0){
+			moveStr = response.substring(5);
+		} else if(response.indexOf('egtb:') === 0){
+			moveStr = response.substring(5);
+		} else if(response.indexOf('search:') === 0){
+			moveStr = response.substring(7);
+		}
+
+		if(moveStr && moveStr.length >= 4){
+			callback(moveStr, response);
+			return;
+		}
+		callback(null, response);
+	})
+	.catch(function(err){
+		console.error('云库querybest' + (endgameOnly ? '(仅残局)' : '') + '查询失败:', err);
+		callback(null, 'error');
+	});
+}
+
+function cloudQueryAllPick(fen, callback){
+	var allUrl = 'https://www.chessdb.cn/chessdb.php?action=queryall&board=' + encodeURIComponent(fen)
+		+ '&egtbmetric=dtm';
+	fetch(allUrl)
+	.then(function(r){ return r.text(); })
+	.then(function(response){
+		response = (response || '').trim();
+		console.log('云库queryall返回:', response);
+
+		// queryall 返回格式: move,score,rank,winrate,note|move,score,rank,winrate,note|...
+		if(!response || response === 'unknown' || response === 'invalid board' || response === 'checkmate' || response === 'stalemate'){
+			callback(null); return;
+		}
+
+		// 解析所有着法
+		var entries = response.split('|');
+		var validMoves = [];
+		for(var i = 0; i < entries.length; i++){
+			var parts = entries[i].split(',');
+			var mv = parts[0].trim();
+			if(mv && mv.length >= 4){
+				validMoves.push(mv);
+			}
+		}
+
+		if(validMoves.length === 0){ callback(null); return; }
+
+		// 随机选择一个着法
+		var pick = validMoves[Math.floor(Math.random() * validMoves.length)];
+		console.log('云库queryall随机选择着法: ' + pick + ' (共' + validMoves.length + '个着法)');
+		callback(pick);
+	})
+	.catch(function(err){
+		console.error('云库queryall查询失败:', err);
+		callback(null);
+	});
+}
+
+function applyCloudMove(moveStr){
+	// chessdb.cn坐标: 列a-i(0-8), 行0-9从底部(红方底线)开始
+	// 内部坐标: 行0=顶部(黑方底线), 行9=底部(红方底线)
+	var fromCol = moveStr.charCodeAt(0) - 97;
+	var fromRowApi = parseInt(moveStr[1]);
+	var toCol = moveStr.charCodeAt(2) - 97;
+	var toRowApi = parseInt(moveStr[3]);
+	var move = {fromRow: 9 - fromRowApi, fromCol: fromCol, toRow: 9 - toRowApi, toCol: toCol};
+	console.log('云库着法:', moveStr, '→ 内部坐标:', JSON.stringify(move));
+	doAiMove(move);
+}
+
+// 人机对弈AI入口：优先使用高级AI云库（开局库+残局库），无结果/超时/失败时回退本地AI引擎
 function startAiThink(){
+if(aiThinking||engine.gameOver||engine.currentTurn!==aiCl)return;
+aiThinking=true;
+D('turnText').textContent='云端AI思考中...';
+var fen=boardToFen(engine.board,engine.currentTurn);
+var settled=false;   // 防止云库迟到的响应与本地回退重复落子
+var useLocal=function(){
+	if(settled)return; settled=true;
+	aiThinking=false;               // 复位，交还原有本地AI流程（其内部自行置位）
+	startAiThinkLocal();
+};
+// 总超时保护：云库无响应6秒即回退本地，防止卡死
+setTimeout(function(){ if(aiThinking&&!settled){ console.log('云库查询超时，回退本地AI'); useLocal(); } },6000);
+cloudQueryBest(fen,false,function(mv1,rp1){
+	if(settled||!aiThinking)return;
+	if(mv1&&mv1.length>=4){ settled=true; aiThinking=false; applyCloudMove(mv1); return; }
+	// 策略2: 仅查残局库 (endgame=1)
+	if(rp1==='nobestmove'||rp1==='unknown'||rp1==='error'){
+		cloudQueryBest(fen,true,function(mv2,rp2){
+			if(settled||!aiThinking)return;
+			if(mv2&&mv2.length>=4){ settled=true; aiThinking=false; applyCloudMove(mv2); return; }
+			// 策略3: queryall 获取所有已知着法随机选一步
+			cloudQueryAllPick(fen,function(mv3){
+				if(settled||!aiThinking)return;
+				if(mv3){ settled=true; aiThinking=false; applyCloudMove(mv3); return; }
+				useLocal();
+			});
+		});
+		return;
+	}
+	// checkmate / stalemate / invalid board 等：直接回退本地AI处理终局
+	useLocal();
+});
+}
+
+function startAiThinkLocal(){
 if(aiThinking||engine.gameOver||engine.currentTurn!==aiCl)return;
 aiThinking=true;
 D('turnText').textContent='AI思考中...';
@@ -5558,184 +5962,70 @@ if(aiWorker){try{aiWorker.terminate();}catch(e){}aiWorker=null;}
 aiThinking=false;
 }
 
-// ========== 高级AI人机对弈（象棋云库） ==========
-function boardToFen(board, currentTurn){
-	var pieceMap = {
-		king:   {red:'K', black:'k'},
-		advisor:{red:'A', black:'a'},
-		elephant:{red:'B', black:'b'},
-		horse:  {red:'N', black:'n'},
-		rook:   {red:'R', black:'r'},
-		cannon: {red:'C', black:'c'},
-		pawn:   {red:'P', black:'p'}
-	};
-	var fen = '';
-	for(var r = 0; r < 10; r++){
-		var empty = 0;
-		for(var c = 0; c < 9; c++){
-			var p = board[r][c];
-			if(p){
-				if(empty > 0){ fen += empty; empty = 0; }
-				fen += pieceMap[p.type][p.color];
-			} else {
-				empty++;
-			}
-		}
-		if(empty > 0) fen += empty;
-		if(r < 9) fen += '/';
-	}
-	fen += ' ' + (currentTurn === 'red' ? 'w' : 'b');
-	return fen;
-}
-
-function startCloudAiGame(userColor){
+// ========== Pikafish 深度引擎 ==========
+function startPikafishGame(userColor){
 	if(aiThinking) return;
 	userColor = userColor || (Math.random() < 0.5 ? 'red' : 'black');
 	soundEnabled = true; gameOverSoundPlayed = false; undoUsed = false; aiThinking = false;
-	gm = 'cloudai'; myCl = userColor; myRm = null; boardFlip = (userColor === 'black');
+	gm = 'pikafish'; myCl = userColor; myRm = null; boardFlip = (userColor === 'black');
 	aiCl = (userColor === 'red') ? 'black' : 'red';
 	D('drawBtn').style.display = 'none';
-	D('redName').textContent = (userColor === 'red') ? '我（红方）' : 'AI（红方）';
-	D('blackName').textContent = (userColor === 'black') ? '我（黑方）' : 'AI（黑方）';
-	D('modeBadge').textContent = '高级AI人机对弈';
+	D('redName').textContent = (userColor === 'red') ? '我（红方）' : 'Pikafish（红方）';
+	D('blackName').textContent = (userColor === 'black') ? '我（黑方）' : 'Pikafish（黑方）';
+	D('modeBadge').textContent = 'Pikafish 深度AI';
 	engine.initBoard(); engine.currentTurn = 'red'; engine.gameOver = false; engine.winner = null; engine.moveHistory = [];
 	capRed = []; capBlk = []; lastMove = null; selected = null; validMoves = []; gameStarted = true; clickCount = 0;
 	checkStreak = 0; lastCheckColor = null;
 	enterGameUI();
 	saveGameState();
-	if(aiCl === 'red' && !engine.gameOver){ cloudAiThink(); }
+	if(aiCl === 'red' && !engine.gameOver){ pikafishDeepThink(); }
 }
 
-function cloudAiThink(){
-	if(aiThinking || engine.gameOver || engine.currentTurn !== aiCl) return;
+async function pikafishDeepThink(){
+	console.log('[pikafishDeepThink] called, aiThinking=' + aiThinking + ' gameOver=' + engine.gameOver + ' currentTurn=' + engine.currentTurn + ' aiCl=' + aiCl);
+	if(aiThinking || engine.gameOver || engine.currentTurn !== aiCl){
+		console.log('[pikafishDeepThink] SKIP: condition not met');
+		return;
+	}
 	aiThinking = true;
-	D('turnText').textContent = '云端AI思考中...';
-	var fen = boardToFen(engine.board, engine.currentTurn);
-	
-	// 策略1: querybest（含开局库+残局库，egtbmetric=dtm）
-	cloudQueryBest(fen, false /* 不限制残局 */, function(moveStr, response){
-		if(moveStr){
-			cloudDoMove(moveStr); return;
-		}
-		// 策略2: querybest 仅查残局库 (endgame=1)
-		if(response === 'nobestmove' || response === 'unknown'){
-			console.log('云库querybest返回 ' + response + '，尝试仅查残局库...');
-			cloudQueryBest(fen, true /* 仅残局 */, function(egtbMove, egResponse){
-				if(egtbMove){
-					cloudDoMove(egtbMove); return;
+	D('turnText').textContent = 'Pikafish 深度思考中...';
+	console.log('=== Pikafish Deep AI thinking (depth 15) ===');
+
+	try {
+		var pfEngine = await getPikafishEngine();
+		console.log('[pikafishDeepThink] pfEngine ready=' + pfEngine.ready);
+		var move = await pfEngine.findBestMove(engine.board, engine.currentTurn, 3, 3000);
+		console.log('[pikafishDeepThink] findBestMove returned:', JSON.stringify(move));
+		if(move){
+			// Pikafish 返回 UCI 格式走法 (如 "b2e2")，需转换为内部格式 {fromRow,fromCol,toRow,toCol}
+			if (typeof move === 'string' && move.length >= 4 && move !== '0000') {
+				var fromCol = move.charCodeAt(0) - 97;
+				var fromRow = parseInt(move[1]);
+				var toCol = move.charCodeAt(2) - 97;
+				var toRow = parseInt(move[3]);
+				if (!isNaN(fromRow) && !isNaN(toRow) && fromCol >= 0 && fromCol <= 8 && toCol >= 0 && toCol <= 8 && fromRow >= 0 && fromRow <= 9 && toRow >= 0 && toRow <= 9) {
+					move = {
+						fromRow: fromRow,
+						fromCol: fromCol,
+						toRow: toRow,
+						toCol: toCol,
+						piece: engine.board[fromRow] && engine.board[fromRow][fromCol]
+					};
+					console.log('[pikafishDeepThink] converted UCI move to:', JSON.stringify(move));
 				}
-				// 策略3: queryall 获取所有已知着法
-				console.log('残局库也无结果(' + egResponse + ')，尝试queryall...');
-				cloudQueryAll(fen);
-			});
-			return;
-		}
-		// checkmate / stalemate / invalid board 等
-		console.log('云库无法出步: ' + response + '，回退到本地AI');
-		fallbackToLocalAI();
-	});
-}
-
-function cloudQueryBest(fen, endgameOnly, callback){
-	// 通用querybest查询，endgameOnly=true时仅查残局库
-	var url = 'https://www.chessdb.cn/chessdb.php?action=querybest&board=' + encodeURIComponent(fen)
-		+ '&egtbmetric=dtm';
-	if(endgameOnly) url += '&endgame=1';
-	
-	fetch(url)
-	.then(function(r){ return r.text(); })
-	.then(function(response){
-		if(!aiThinking) return;
-		response = (response || '').trim();
-		console.log('云库querybest' + (endgameOnly ? '(仅残局)' : '') + '返回:', response);
-		
-		// 解析: move:[MOVE] / egtb:[MOVE] / search:[MOVE]
-		var moveStr = null;
-		if(response.indexOf('move:') === 0){
-			moveStr = response.substring(5);
-		} else if(response.indexOf('egtb:') === 0){
-			moveStr = response.substring(5);
-		} else if(response.indexOf('search:') === 0){
-			moveStr = response.substring(7);
-		}
-		
-		if(moveStr && moveStr.length >= 4){
-			callback(moveStr, response);
-			return;
-		}
-		callback(null, response);
-	})
-	.catch(function(err){
-		console.error('云库querybest' + (endgameOnly ? '(仅残局)' : '') + '查询失败:', err);
-		if(!aiThinking) return;
-		callback(null, 'error');
-	});
-}
-
-function cloudQueryAll(fen){
-	var allUrl = 'https://www.chessdb.cn/chessdb.php?action=queryall&board=' + encodeURIComponent(fen)
-		+ '&egtbmetric=dtm';
-	fetch(allUrl)
-	.then(function(r){ return r.text(); })
-	.then(function(response){
-		if(!aiThinking) return;
-		response = (response || '').trim();
-		console.log('云库queryall返回:', response);
-		
-		// queryall 返回格式: move,score,rank,winrate,note|move,score,rank,winrate,note|...
-		// 例如: c3c4,??,0,??,|b2e2,??,0,??,|h9g7,??,0,??,
-		if(!response || response === 'unknown' || response === 'invalid board' || response === 'checkmate' || response === 'stalemate'){
-			console.log('云库queryall无结果: ' + response + '，回退到本地AI');
-			fallbackToLocalAI();
-			return;
-		}
-		
-		// 解析所有着法
-		var entries = response.split('|');
-		var validMoves = [];
-		for(var i = 0; i < entries.length; i++){
-			var parts = entries[i].split(',');
-			var move = parts[0].trim();
-			if(move && move.length >= 4){
-				validMoves.push(move);
+			}
+			if (move && typeof move === 'object' && move.fromRow !== undefined) {
+				doAiMove(move);
+				return;
 			}
 		}
-		
-		if(validMoves.length === 0){
-			console.log('云库queryall解析无有效着法，回退到本地AI');
-			fallbackToLocalAI();
-			return;
-		}
-		
-		// 随机选择一个着法
-		var pick = validMoves[Math.floor(Math.random() * validMoves.length)];
-		console.log('云库queryall随机选择着法: ' + pick + ' (共' + validMoves.length + '个着法)');
-		cloudDoMove(pick);
-	})
-	.catch(function(err){
-		console.error('云库queryall查询失败:', err);
-		if(!aiThinking) return;
-		fallbackToLocalAI();
-	});
-}
+		console.log('Pikafish 返回空着法，回退到本地AI');
+	} catch(e) {
+		console.error('Pikafish deep engine error:', e);
+	}
 
-function cloudDoMove(moveStr){
-	// chessdb.cn坐标: 列a-i(0-8), 行0-9从底部(红方底线)开始
-	// 内部坐标: 行0=顶部(黑方底线), 行9=底部(红方底线)
-	var fromCol = moveStr.charCodeAt(0) - 97;
-	var fromRowApi = parseInt(moveStr[1]);
-	var toCol = moveStr.charCodeAt(2) - 97;
-	var toRowApi = parseInt(moveStr[3]);
-	var fromRow = 9 - fromRowApi;
-	var toRow = 9 - toRowApi;
-	var move = {fromRow: fromRow, fromCol: fromCol, toRow: toRow, toCol: toCol};
-	console.log('云库着法:', moveStr, '→ 内部坐标:', move);
-	doAiMove(move);
-}
-
-function fallbackToLocalAI(){
-	aiThinking = false;
 	// 回退到本地AI
+	aiThinking = false;
 	setTimeout(function(){
 		var fb = aiFindBestMove(undefined, aiCl, engine.moveHistory.slice());
 		if(fb){ try{ doAiMove(fb); } catch(ex){ console.error('doAiMove异常:',ex); aiThinking = false; D('turnText').textContent = (aiCl === 'black') ? '红方走棋' : '黑方走棋'; } }
@@ -5743,22 +6033,22 @@ function fallbackToLocalAI(){
 	}, 50);
 }
 
-function retryCloudAiGame(){
+function retryPikafishGame(){
 	hideOverlay();
 	stopAi();
 	soundEnabled = true; gameOverSoundPlayed = false; undoUsed = false; aiThinking = false;
-	gm = 'cloudai';
+	gm = 'pikafish';
 	var uc = Math.random() < 0.5 ? 'red' : 'black';
 	myCl = uc; boardFlip = (uc === 'black'); aiCl = (uc === 'red') ? 'black' : 'red';
-	D('redName').textContent = (uc === 'red') ? '我（红方）' : 'AI（红方）';
-	D('blackName').textContent = (uc === 'black') ? '我（黑方）' : 'AI（黑方）';
-	D('modeBadge').textContent = '高级AI人机对弈';
+	D('redName').textContent = (uc === 'red') ? '我（红方）' : 'Pikafish（红方）';
+	D('blackName').textContent = (uc === 'black') ? '我（黑方）' : 'Pikafish（黑方）';
+	D('modeBadge').textContent = 'Pikafish 深度AI';
 	engine.initBoard(); engine.currentTurn = 'red'; engine.gameOver = false; engine.winner = null; engine.moveHistory = [];
 	capRed = []; capBlk = []; lastMove = null; selected = null; validMoves = []; gameStarted = true; clickCount = 0; checkStreak = 0; lastCheckColor = null;
 	D('turnText').textContent = '红方走棋';
 	drawBoardBg(); render(); startTimer(); sndStart();
 	saveGameState();
-	if(aiCl === 'red' && !engine.gameOver){ cloudAiThink(); }
+	if(aiCl === 'red' && !engine.gameOver){ pikafishDeepThink(); }
 }
 
 function discSocket(){if(socket){try{socket.disconnect();}catch(e){}socket=null;}}
@@ -5830,11 +6120,16 @@ document.addEventListener('webkitfullscreenchange',onFsChange);
 window.addEventListener('load',function(){setTimeout(function(){window.scrollTo(0,1);},100);});
 
 (function(){
+var urlParams=new URLSearchParams(window.location.search);
+if(urlParams.get('start')==='pikafish'){
+setTimeout(function(){startPikafishGame(urlParams.get('color')||null);},500);
+return;
+}
 try{var s=localStorage.getItem('xq_game');if(s){var g=JSON.parse(s);
-if(g.gm==='ai'||g.gm==='cloudai'){
+if(g.gm==='ai'||g.gm==='pikafish'){
 gm=g.gm;myCl=g.myCl||'red';aiCl=g.aiCl||'black';boardFlip=(myCl==='black');soundEnabled=true;gameOverSoundPlayed=false;
 D('lobby').classList.add('hide');D('game').classList.add('show');
-D('modeBadge').textContent=(g.gm==='cloudai')?'高级AI人机对弈':'人机对弈';
+D('modeBadge').textContent=(g.gm==='pikafish')?'Pikafish深度AI':'人机对弈';
 D('drawBtn').style.display='none';
 D('redName').textContent=(myCl==='red')?'我（红方）':'AI（红方）';
 D('blackName').textContent=(myCl==='black')?'我（黑方）':'AI（黑方）';
@@ -5851,7 +6146,7 @@ D('turnText').textContent=engine.currentTurn==='red'?'红方走棋':'黑方走�
 requestAnimationFrame(function(){updateBoardSize();drawBoardBg();render();});
 if(!engine.gameOver){startTimer();updateTimers();}
 if(engine.currentTurn===aiCl&&!engine.gameOver){
-if(g.gm==='cloudai')cloudAiThink();else startAiThink();
+if(g.gm==='pikafish')pikafishDeepThink();else startAiThink();
 }
 }else if(g.gm==='online'&&g.myRm){
 window._pendingReconnect=g;
@@ -5876,7 +6171,22 @@ showReconnecting();
 }}}catch(e){}
 })();
 
+// v2: 大厅后台预载 Pikafish 引擎资产（进站静默下载→IndexedDB缓存，点击按钮秒开）
+window.addEventListener('load', function(){
+  setTimeout(function(){
+    try{
+      if(window._pikaWasmBinary && window._pikaNnueBinary) return;
+      if(new URLSearchParams(location.search).get('start')==='pikafish') return;
+      Promise.resolve(loadPikafishWasm())
+        .then(function(){ return loadPikafishNnue(); })
+        .then(function(){ console.log('[Pikafish] 后台预载完成，随时可开始深度对局'); })
+        .catch(function(e){ console.log('[Pikafish] 后台预载跳过:', (e&&e.message)||e); });
+    }catch(e){}
+  }, 2000);
+});
+
 connectSocket();
 </script>
+<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v4513226cdae34746b4dedf0b4dfa099e1781791509496" integrity="sha512-ZE9pZaUXND66v380QUtch/5sE9tPFh2zg45pR2PB0CVkCtOREv2AJKkSidISWkysEuQ0EH8faUU5du78bx87UQ==" data-cf-beacon='{"version":"2024.11.0","token":"0a4ff2af697e451c85fdf620787d507c","r":1}' crossorigin="anonymous"></script>
 </body>
 </html>

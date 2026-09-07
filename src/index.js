@@ -34,9 +34,13 @@ function createAppRouter(db, roomManager) {
     next();
   });
 
-  // AI 数据库检查
+  // AI 数据库检查（与 Worker 版返回结构一致：{raw, aiTotalStats}）
   router.get('/ai/db-check', (req, res) => {
-    res.json({ aiTotalStats });
+    let raw = null;
+    try {
+      raw = db.prepare('SELECT * FROM ai_weights WHERE id = 1').get();
+    } catch (e) {}
+    res.json({ raw, aiTotalStats });
   });
 
   // 服务端 AI 最佳走法
@@ -138,6 +142,7 @@ function createAppRouter(db, roomManager) {
   router.get('/train/status', (req, res) => {
     res.json({
       training: serverTraining,
+      session: serverTrainSession,
       serverSession: serverTrainSession,
       total: aiTotalStats,
       weights: aiWeights
