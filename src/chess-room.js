@@ -172,6 +172,7 @@ class ChessRoomManager {
   }
 
   saveRoom(room) {
+    if (room._destroyed) return;
     try { saveRoomState(this.db, room.id, this.getSerializableState(room)); } catch (e) {}
   }
 
@@ -669,6 +670,7 @@ class ChessRoomManager {
           }
           try { ws.close(); } catch (e) {}
           try { deleteRoomState(this.db, room.id); } catch (e) {}
+          room._destroyed = true; // 与 Worker 版一致：销毁后禁止 close 事件再次保存状态（否则旧盘面会复活）
           this.rooms.delete(room.id);
           room.disconnected = {};
         }
@@ -680,6 +682,9 @@ class ChessRoomManager {
     ws.on('close', () => {
       stopHeartbeat();
       this.removeConnection(ws);
+
+      // 房间已被 leave_room 销毁：与 Worker 版 if (!this.room) return 语义一致，禁止复活状态
+      if (room._destroyed) return;
 
       if (socketData.spectator) {
         room.spectators.delete(ws);
@@ -704,7 +709,7 @@ class ChessRoomManager {
 
       if (!room._disconnectTimer) {
         room._disconnectTimer = setTimeout(() => {
-          if (!room || room.gameOver) return;
+          if (!room || room._destroyed || room.gameOver) return;
           const now = Date.now();
           for (const color of ['red', 'black']) {
             if (room.disconnected[color] && now - room.disconnected[color] > 18e4) {
