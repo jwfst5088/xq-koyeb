@@ -1042,12 +1042,21 @@ var starRow=function(r){return ps+r*(bh/9);},starCol=function(c){return ps+c*(bw
 var starPts=[[2,1],[2,7],[7,1],[7,7],[3,0],[3,2],[3,4],[3,6],[3,8],[6,0],[6,2],[6,4],[6,6],[6,8]];
 for(var si=0;si<starPts.length;si++){
   var sy=starRow(starPts[si][0]),sx=starCol(starPts[si][1]);
+  var skipL=starPts[si][1]===0,skipR=starPts[si][1]===8;
   ctx.strokeStyle='#a07840';ctx.lineWidth=0.8;
   var d=cs*0.08;
+  if(!skipL){
   ctx.beginPath();ctx.moveTo(sx-d-stL,sy-d);ctx.lineTo(sx-d,sy-d);ctx.lineTo(sx-d,sy-d-stL);ctx.stroke();
+  }
+  if(!skipR){
   ctx.beginPath();ctx.moveTo(sx+d+stL,sy-d);ctx.lineTo(sx+d,sy-d);ctx.lineTo(sx+d,sy-d-stL);ctx.stroke();
+  }
+  if(!skipL){
   ctx.beginPath();ctx.moveTo(sx-d-stL,sy+d);ctx.lineTo(sx-d,sy+d);ctx.lineTo(sx-d,sy+d+stL);ctx.stroke();
+  }
+  if(!skipR){
   ctx.beginPath();ctx.moveTo(sx+d+stL,sy+d);ctx.lineTo(sx+d,sy+d);ctx.lineTo(sx+d,sy+d+stL);ctx.stroke();
+  }
 }
 }
 
